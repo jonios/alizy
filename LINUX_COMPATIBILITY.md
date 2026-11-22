@@ -23,6 +23,14 @@ was not found (WireGuard tools). Fix: sudo apt install wireguard-tools"*).
 | WebKitGTK 4.1 | GUI | webkit2gtk-4.1 / libwebkit2gtk-4.1-0 / webkit2gtk4.1 / libwebkit2gtk-4_1-0 |
 | Ayatana AppIndicator | tray (optional) | libayatana-appindicator / libayatana-appindicator3-1 / libayatana-appindicator-gtk3 / libayatana-appindicator3-1 |
 | Secret Service (GNOME Keyring, KWallet, KeePassXC) | key storage (optional; 0600 file fallback) | — |
+| OpenSSH client ≥ 8.4 (`ssh`, `ssh-keyscan`) | SSH profiles (optional) | openssh / openssh-client / openssh-clients / openssh-clients |
+| `badvpn-tun2socks` | SSH profiles (optional) | badvpn (all; may need a third-party repository) |
+| `alizy-ssh` system user | SSH profiles | created by the packages (`sysusers.d`) |
+
+SSH dependencies are optional: when missing, System Check shows an
+informational note and WireGuard is unaffected. The OpenSSH version is checked
+by running `ssh -V` as `alizy-ssh` (never as root); `alizyd --probe` only
+checks that the executables exist.
 
 ## Tested matrix
 

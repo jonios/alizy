@@ -55,6 +55,13 @@ atomically:
   leak rules and *before* the final reject — so bypass is explicit and DNS never
   bypasses.
 
+### SSH profiles
+
+The SSH tunnel is TCP-only: UDP into `alizy0` is rejected while an SSH profile
+is connected (QUIC falls back to TCP). Direct rules work as above for TCP and
+UDP alike, because bypassed packets leave through the physical interface and
+never reach the tunnel.
+
 ## Application-based split tunnelling
 
 | Platform | Status |

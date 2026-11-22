@@ -1,4 +1,4 @@
 # Members of this group may control the Alizy service through its socket.
 g alizy - -
 # Unprivileged user the daemon runs ssh and badvpn-tun2socks as (SSH profiles).
-u alizy-ssh - "Alizy SSH tunnel" /run/alizy/ssh /usr/bin/nologin
+u alizy-ssh - "Alizy SSH tunnel" /run/alizy/ssh -

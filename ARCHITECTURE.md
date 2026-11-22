@@ -93,6 +93,31 @@ refuses to move along an illegal edge.
 4. Bring up the new interface, routes, DNS.
 5. On any failure the rules from step 2 remain → fail closed.
 
+## SSH tunnel backend
+
+SSH profiles use the same `alizy0` interface, state machine, kill switch and
+routing plans as WireGuard; only the tunnel itself differs.
+
+| Component | Location | Runs as |
+|---|---|---|
+| Profile model, validation, fingerprint | `alizy-core::ssh` | — |
+| Firewall: server TCP exception, SOCKS-port `skuid` rules, UDP reject | `alizy-core::firewall` (`TunnelRules`) | — |
+| Forwarder upstreams, `127.77.0.1` DNS plan | `alizy-core::routing` | — |
+| `ssh -N -D 127.0.0.1:<port>` (password auth, pinned host key) | `alizyd::linux::ssh` | alizy-ssh |
+| `ssh-keyscan` (trust on first use) | `alizyd::linux::ssh::keyscan` | alizy-ssh |
+| `badvpn-tun2socks` (TUN `alizy0` ↔ SOCKS) | `alizyd::linux::ssh` | alizy-ssh |
+| One-shot password helper (`SSH_ASKPASS` = alizyd itself) | `alizyd::askpass` | root (server), alizy-ssh (client) |
+| DNS forwarder on `127.77.0.1:53` (DNS-over-TCP via SOCKS) | `alizyd::socks_dns` | root (in-daemon) |
+| Bring-up cancellation (lock-free; fired by disconnect/connect) | `alizyd::cancel` | — |
+| Password storage | `alizy-store` (keyring / 0600 file, never SQLite) | user |
+
+Bring-up order: firewall for the new tunnel → (unknown key: keyscan, stop and
+ask the user) → known_hosts → TUN owned by alizy-ssh → askpass → ssh →
+readiness (a SOCKS5 greeting answered by a listener owned by alizy-ssh) →
+tun2socks → DNS forwarder → routes → system DNS. The bring-up holds the engine
+lock; `disconnect`/`connect` cancel it through `alizyd::cancel` before waiting
+for the lock, so they complete within about a second. Status reads never wait.
+
 ## Data locations
 
 | Data | Location | Permissions |
