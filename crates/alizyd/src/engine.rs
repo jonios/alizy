@@ -226,6 +226,7 @@ impl Engine {
         let tunnel = inner.active.as_ref().map(|a| TunnelRules {
             iface: self.iface.clone(),
             endpoints: a.endpoints.iter().flatten().copied().collect(),
+            ..Default::default()
         });
         let direct = if inner.persisted.split.enabled {
             let resolved = inner
