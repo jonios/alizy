@@ -54,7 +54,7 @@ fn main() {
 #[cfg(target_os = "linux")]
 mod linux_main {
     use crate::auth::{AuthMode, Authorizer};
-    use crate::engine::Engine;
+    use crate::engine::{Engine, SshEnv};
     use crate::linux::{self, LinuxAdapter};
     use crate::persist::Persist;
     use crate::resolver::Resolver;
@@ -152,6 +152,38 @@ mod linux_main {
         }
     }
 
+    /// `alizy-ssh` (uid, primary gid), or `None` (SSH tunnels disabled) when the
+    /// user is missing or is root. Prepares the runtime directory when we are root.
+    fn ssh_env() -> SshEnv {
+        let runtime = PathBuf::from(linux::ssh::RUNTIME_DIR);
+        let user = match nix::unistd::User::from_name(linux::ssh::SSH_USER) {
+            Ok(Some(u)) if !u.uid.is_root() && u.gid.as_raw() != 0 => Some((u.uid.as_raw(), u.gid.as_raw())),
+            Ok(Some(_)) => {
+                tracing::error!("{} must not be root; SSH tunnels disabled", linux::ssh::SSH_USER);
+                None
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    "system user {} is missing; SSH tunnels are unavailable (WireGuard is unaffected)",
+                    linux::ssh::SSH_USER
+                );
+                None
+            }
+            Err(e) => {
+                tracing::warn!("looking up {}: {e}; SSH tunnels unavailable", linux::ssh::SSH_USER);
+                None
+            }
+        };
+        if let Some((_, gid)) = user {
+            if nix::unistd::geteuid().is_root() {
+                if let Err(e) = linux::ssh::ensure_runtime_dir(&runtime, gid) {
+                    tracing::error!("SSH runtime directory {}: {e}", runtime.display());
+                }
+            }
+        }
+        SshEnv { user, runtime }
+    }
+
     async fn remove_everything() -> anyhow::Result<()> {
         for c in alizy_core::routing::teardown_commands(TUNNEL_IFACE) {
             let _ = crate::exec::run(&c, None).await;
@@ -210,6 +242,7 @@ mod linux_main {
             persist,
             Resolver::new(args.resolv_conf.clone()),
             args.iface.clone(),
+            ssh_env(),
         )
         .await;
 

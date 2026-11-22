@@ -26,7 +26,6 @@
 //! [`LIFETIME`] and on `Drop`.
 //!
 //! The password never appears in argv, the environment, logs or files.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use std::ffi::OsString;
 use std::io::{self, Read, Write};

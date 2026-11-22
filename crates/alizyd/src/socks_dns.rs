@@ -11,7 +11,6 @@
 //! with the TC bit set, so the client retries over TCP.
 //!
 //! Query names are never logged above debug level.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use std::io;
 use std::net::{IpAddr, SocketAddr};

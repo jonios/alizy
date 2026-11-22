@@ -296,6 +296,12 @@ fn compute_ssh_missing(has_exe: impl Fn(&str) -> bool, ssh_v: Option<&str>) -> V
     missing
 }
 
+/// SSH dependencies missing right now (same rules as [`probe`]).
+pub fn ssh_missing() -> Vec<Dependency> {
+    let ssh_v = find_exe("ssh").and_then(|p| ssh_version_output(&p));
+    compute_ssh_missing(|e| find_exe(e).is_some(), ssh_v.as_deref())
+}
+
 /// `ssh -V` prints to stderr, e.g. `OpenSSH_9.6p1, OpenSSL 3.0.13`.
 fn ssh_version_output(ssh_path: &str) -> Option<String> {
     let out = std::process::Command::new(ssh_path)
