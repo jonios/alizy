@@ -237,6 +237,24 @@ async fn query_upstream(socks: SocketAddr, dst: SocketAddr, query: &[u8]) -> io:
     Ok(r)
 }
 
+/// SOCKS5 method selection only: send the no-auth greeting and require the
+/// "no authentication" (0x00) method reply. Proves a SOCKS5 server answers on
+/// `socks` without asking it to connect anywhere (the readiness probe for
+/// `ssh -D`, which listens only after authentication succeeded).
+pub async fn socks5_greeting(socks: SocketAddr) -> io::Result<()> {
+    let mut s = TcpStream::connect(socks).await?;
+    s.write_all(&[5, 1, 0]).await?;
+    let mut g = [0u8; 2];
+    s.read_exact(&mut g).await?;
+    if g != [5, 0] {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "socks5: no acceptable auth method",
+        ));
+    }
+    Ok(())
+}
+
 /// SOCKS5 no-auth CONNECT to `dst` (IPv4 or IPv6 address type) through the
 /// proxy at `socks`. Returns the stream, positioned after the reply.
 pub async fn socks5_connect(socks: SocketAddr, dst: SocketAddr) -> io::Result<TcpStream> {
@@ -679,5 +697,32 @@ mod tests {
         let socks = fake_socks(HashMap::new()).await;
         let err = socks5_connect(socks, "10.9.9.9:53".parse().unwrap()).await.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::ConnectionRefused);
+    }
+
+    /// A listener that answers every greeting with `reply` (or closes at once when empty).
+    async fn greeter(reply: &'static [u8]) -> SocketAddr {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = l.accept().await else { return };
+                let mut g = [0u8; 3];
+                if s.read_exact(&mut g).await.is_ok() {
+                    let _ = s.write_all(reply).await;
+                }
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn socks5_greeting_needs_no_auth_method_reply() {
+        socks5_greeting(greeter(&[5, 0]).await).await.unwrap();
+        let e = socks5_greeting(greeter(&[5, 0xFF]).await).await.unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
+        assert!(socks5_greeting(greeter(&[]).await).await.is_err());
+        // Nothing listening.
+        let free = TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap();
+        assert!(socks5_greeting(free).await.is_err());
     }
 }

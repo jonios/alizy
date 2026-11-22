@@ -4,6 +4,7 @@
 //! firewall change is one atomic nft transaction followed by a read-back
 //! verification. The engine never removes blocking rules to perform an update.
 
+use crate::cancel::{CancelSource, CancelToken};
 use crate::events::Events;
 use crate::linux::ssh::{self as sshb, SshError, SshUp};
 use crate::linux::{firewall, LinuxAdapter};
@@ -17,12 +18,12 @@ use alizy_core::ipc::{
 };
 use alizy_core::platform::PlatformAdapter;
 use alizy_core::routing::{
-    compatibility_warnings, dns_plan, route_plan, ssh_dns_plan, ssh_public_config, ssh_upstreams, DnsPlan,
+    compatibility_warnings, dns_plan, route_plan, ssh_dns_plan, ssh_public_config, ssh_upstream_plan, DnsPlan,
 };
 use alizy_core::split::{self, Action, SplitConfig, MAX_RULES};
 use alizy_core::ssh::{HostKey, SshConfig};
 use alizy_core::state::{transition, ConnectionState, Event};
-use alizy_core::sysprobe::DnsBackend;
+use alizy_core::sysprobe::{Dependency, DnsBackend};
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -47,11 +48,13 @@ pub trait Backend: PlatformAdapter {
     async fn ssh_up(&self, req: SshUp<'_>) -> Result<(), SshError>;
     /// `Some(reason)` once a running SSH tunnel's ssh or tun2socks has exited.
     async fn ssh_try_exited(&self) -> Option<String>;
-    /// Fetch a server's host key, running as `user` (never root).
-    async fn keyscan(&self, user: (u32, u32), host: IpAddr, port: u16) -> Result<HostKey, String>;
-    /// Missing SSH dependencies (human-readable names); empty when ready.
-    /// Any version probe runs as `user`, never root.
-    async fn ssh_missing(&self, user: (u32, u32)) -> Vec<String>;
+    /// Fetch a server's host key, running as `user` (never root). Gives up
+    /// promptly once `cancel` fires.
+    async fn keyscan(&self, user: (u32, u32), host: IpAddr, port: u16, cancel: &CancelToken)
+        -> Result<HostKey, String>;
+    /// Missing SSH dependencies; empty when ready. Any version probe runs as
+    /// `user`, never root, with a timeout.
+    async fn ssh_missing(&self, user: (u32, u32)) -> Vec<Dependency>;
 }
 
 /// Where and as whom SSH tunnels run.
@@ -159,6 +162,9 @@ pub struct Engine<A = LinuxAdapter> {
     route_tests: tokio::sync::Semaphore,
     adapter: A,
     ssh: SshEnv,
+    /// Cancels an in-progress bring-up. Deliberately outside `inner`:
+    /// `disconnect`/`connect` bump it *before* waiting for the lock.
+    cancel: CancelSource,
     inner: Mutex<Inner>,
     pub events: Events,
     persist: Persist,
@@ -205,6 +211,7 @@ impl<A: Backend> Engine<A> {
             route_tests: tokio::sync::Semaphore::new(2),
             adapter,
             ssh,
+            cancel: CancelSource::default(),
             inner: Mutex::new(Inner {
                 state: ConnectionState::Disconnected,
                 persisted,
@@ -469,8 +476,15 @@ impl<A: Backend> Engine<A> {
 
     /// Bring a tunnel up. Firewall first, interface second. On failure the
     /// tunnel is removed and the no-tunnel policy re-applied; state is left to the caller.
-    async fn bring_up(&self, inner: &mut Inner, spec: &TunnelSpec) -> Result<(), UpError> {
-        let result = self.bring_up_inner(inner, spec).await;
+    ///
+    /// An SSH bring-up that fails after `cancel` fired reports
+    /// [`ErrorCode::Cancelled`]: the user disconnected or connected elsewhere,
+    /// so it is neither an error nor a reason to reconnect.
+    async fn bring_up(&self, inner: &mut Inner, spec: &TunnelSpec, cancel: &CancelToken) -> Result<(), UpError> {
+        let result = match self.bring_up_inner(inner, spec, cancel).await {
+            Err(_) if spec.ssh.is_some() && cancel.is_cancelled() => Err(UpError::from(SshError::Cancelled)),
+            r => r,
+        };
         if let Err(e) = &result {
             if let Err(td) = self.adapter.tunnel_down(&self.iface).await {
                 self.events
@@ -484,7 +498,13 @@ impl<A: Backend> Engine<A> {
                     format!("Re-applying protection after failure: {fe}"),
                 );
             }
-            if e.code == ErrorCode::HostKeyUnknown {
+            if e.code == ErrorCode::Cancelled {
+                self.events.push(
+                    Lvl::Info,
+                    Cat::Connection,
+                    format!("Connection attempt to {} cancelled.", spec.profile_name),
+                );
+            } else if e.code == ErrorCode::HostKeyUnknown {
                 // Not a failure: the user has to confirm the server's key first.
                 self.events.push(
                     Lvl::Info,
@@ -503,10 +523,10 @@ impl<A: Backend> Engine<A> {
         result
     }
 
-    async fn bring_up_inner(&self, inner: &mut Inner, spec: &TunnelSpec) -> Result<(), UpError> {
+    async fn bring_up_inner(&self, inner: &mut Inner, spec: &TunnelSpec, cancel: &CancelToken) -> Result<(), UpError> {
         let prev = inner.active.as_ref().map(|a| a.kind);
         if let Some(ssh) = &spec.ssh {
-            return self.bring_up_ssh(inner, spec, ssh, prev).await;
+            return self.bring_up_ssh(inner, spec, ssh, prev, cancel).await;
         }
         if prev == Some(TunnelKind::Ssh) {
             // Switching SSH -> WireGuard: stop ssh, tun2socks and the forwarder and
@@ -570,19 +590,31 @@ impl<A: Backend> Engine<A> {
     ///   when ssh reports a host-key failure;
     /// - the 0.3 s tun2socks start check.
     ///
-    /// Status reads use the watch channel and are not blocked; other commands wait.
+    /// Status reads use the watch channel and are not blocked; other commands
+    /// wait. `disconnect` and `connect` don't wait for the whole bring-up:
+    /// they fire `cancel` before taking the lock, and the keyscan and
+    /// readiness waits check it every poll (100–250 ms), so they get the lock
+    /// within about a second. The supervision tick (and with it the periodic
+    /// firewall re-verification) still pauses for the length of an SSH
+    /// bring-up attempt; the firewall itself is applied and verified before
+    /// the slow steps start, and stays in place throughout.
     async fn bring_up_ssh(
         &self,
         inner: &mut Inner,
         spec: &TunnelSpec,
         ssh: &SshConfig,
         prev: Option<TunnelKind>,
+        cancel: &CancelToken,
     ) -> Result<(), UpError> {
         let user = self.ssh.user.ok_or_else(|| UpError {
             code: ErrorCode::MissingDependency,
             msg: MISSING_SSH_USER.into(),
             host_key: None,
         })?;
+        if cancel.is_cancelled() {
+            // Superseded while waiting for the lock: start nothing.
+            return Err(SshError::Cancelled.into());
+        }
         let policy = inner.persisted.policy.clone();
         let public = ssh_public_config(&ssh.public, &policy);
         for w in compatibility_warnings(&public, &policy) {
@@ -610,7 +642,7 @@ impl<A: Backend> Engine<A> {
         if ssh.public.host_key.is_none() {
             let key = self
                 .adapter
-                .keyscan(user, endpoint.ip(), endpoint.port())
+                .keyscan(user, endpoint.ip(), endpoint.port(), cancel)
                 .await
                 .map_err(|e| format!("could not fetch the SSH server's host key: {e}"))?;
             return Err(UpError {
@@ -625,6 +657,19 @@ impl<A: Backend> Engine<A> {
         // 3. ssh + tun2socks + DNS forwarder, routes, system DNS.
         let routes = route_plan(&public, &self.iface, &policy);
         let dns = ssh_dns_plan(&policy);
+        let upstreams = ssh_upstream_plan(&ssh.public, &policy);
+        if !upstreams.dropped.is_empty() {
+            let list = |v: &[IpAddr]| v.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
+            self.events.push(
+                Lvl::Warn,
+                Cat::Dns,
+                format!(
+                    "Custom DNS servers on your local network can't be reached through an SSH tunnel; using {} (ignored: {}).",
+                    list(&upstreams.servers),
+                    list(&upstreams.dropped)
+                ),
+            );
+        }
         self.adapter
             .ssh_up(SshUp {
                 iface: &self.iface,
@@ -632,10 +677,11 @@ impl<A: Backend> Engine<A> {
                 user,
                 runtime: &self.ssh.runtime,
                 socks_port,
-                upstreams: ssh_upstreams(&ssh.public, &policy),
+                upstreams: upstreams.servers,
                 ipv6: policy.ipv6_enabled,
                 routes: &routes,
                 dns: &dns,
+                cancel: cancel.clone(),
             })
             .await?;
         self.sync_split_rule(inner).await;
@@ -673,13 +719,20 @@ impl<A: Backend> Engine<A> {
             };
             let missing = self.adapter.ssh_missing(user).await;
             if !missing.is_empty() {
+                let names: Vec<&str> = missing.iter().map(|d| d.label()).collect();
                 return Err(err(
                     ErrorCode::MissingDependency,
-                    format!("SSH tunnels need: {}", missing.join(", ")),
+                    format!("SSH tunnels need: {}", names.join(", ")),
                 ));
             }
         }
+        // Abandon any bring-up in progress (it holds the lock) before waiting
+        // for the lock; this attempt's own token is taken right after, so a
+        // later disconnect or connect cancels it in turn.
+        let preempt = self.cancel.preempt();
+        let cancel = self.cancel.token();
         let mut inner = self.inner.lock().await;
+        drop(preempt);
         let switching = inner.active.is_some();
         self.go(&mut inner, Event::ConnectRequested)?;
         if switching {
@@ -693,13 +746,14 @@ impl<A: Backend> Engine<A> {
             );
         }
         self.publish(&inner);
-        let result = self.bring_up(&mut inner, &spec).await;
+        let result = self.bring_up(&mut inner, &spec, &cancel).await;
         inner.spec = Some(spec);
         let r = match result {
             Ok(()) => self.go(&mut inner, Event::TunnelUp),
-            Err(e) if e.code == ErrorCode::HostKeyUnknown => {
-                // Waiting for the user, not an error: end like a disconnect
-                // (no `error` state, no reconnect attempt).
+            Err(e) if matches!(e.code, ErrorCode::HostKeyUnknown | ErrorCode::Cancelled) => {
+                // Waiting for the user, or superseded by the user, not an
+                // error: end like a disconnect (no `error` state, no reconnect
+                // attempt).
                 let ks = inner.persisted.policy.kill_switch;
                 inner.spec = None;
                 let _ = self.go(&mut inner, Event::DisconnectRequested);
@@ -718,7 +772,10 @@ impl<A: Backend> Engine<A> {
     }
 
     pub async fn disconnect(&self) -> Result<(), IpcError> {
+        // Make an in-progress SSH bring-up give up the lock promptly.
+        let preempt = self.cancel.preempt();
         let mut inner = self.inner.lock().await;
+        drop(preempt);
         if matches!(inner.state, ConnectionState::Disconnected) {
             return Ok(());
         }
@@ -769,11 +826,24 @@ impl<A: Backend> Engine<A> {
         let r = if needs_rebuild {
             // Rebuild the tunnel for the new routing/DNS; the firewall is replaced atomically first.
             let spec = inner.spec.clone().expect("active tunnel has a spec");
-            match self.bring_up(&mut inner, &spec).await {
+            let cancel = self.cancel.token();
+            match self.bring_up(&mut inner, &spec, &cancel).await {
                 Ok(()) => {
                     if inner.state != ConnectionState::Connected {
                         let _ = self.go(&mut inner, Event::TunnelUp);
                     }
+                    Ok(())
+                }
+                Err(e) if e.code == ErrorCode::Cancelled => {
+                    // A disconnect/connect is waiting: end like a disconnect.
+                    inner.spec = None;
+                    let _ = self.go(&mut inner, Event::DisconnectRequested);
+                    let _ = self.go(
+                        &mut inner,
+                        Event::TornDown {
+                            kill_switch: policy.kill_switch,
+                        },
+                    );
                     Ok(())
                 }
                 Err(e) => {
@@ -912,13 +982,19 @@ impl<A: Backend> Engine<A> {
                 return Ok(r.clone());
             }
         }
-        let r = tokio::time::timeout(
+        let mut r = tokio::time::timeout(
             std::time::Duration::from_secs(20),
             tokio::task::spawn_blocking(alizy_core::sysprobe::probe),
         )
         .await
         .map_err(|_| err(ErrorCode::Internal, "system probe timed out"))?
         .map_err(|e| err(ErrorCode::Internal, e.to_string()))?;
+        // `probe` only checks that the SSH executables exist (it never runs
+        // ssh as root). The authoritative check, including the OpenSSH
+        // version, runs `ssh -V` as alizy-ssh with a timeout.
+        if let Some(user) = self.ssh.user {
+            r.set_ssh_missing(self.adapter.ssh_missing(user).await);
+        }
         *cache = Some((std::time::Instant::now(), r.clone()));
         Ok(r)
     }
@@ -1023,7 +1099,9 @@ impl<A: Backend> Engine<A> {
         if inner.state == ConnectionState::Connected {
             self.health_check(&mut inner, t).await;
         }
-        if inner.state == ConnectionState::Reconnecting && t >= inner.next_reconnect {
+        // A disconnect/connect waiting for the lock goes first (it would only
+        // cancel a reconnect attempt started now).
+        if inner.state == ConnectionState::Reconnecting && t >= inner.next_reconnect && !self.cancel.preempt_pending() {
             self.try_reconnect(&mut inner, t).await;
         }
 
@@ -1128,9 +1206,18 @@ impl<A: Backend> Engine<A> {
                 inner.reconnect_attempt, spec.profile_name
             ),
         );
-        match self.bring_up(inner, &spec).await {
+        let cancel = self.cancel.token();
+        match self.bring_up(inner, &spec, &cancel).await {
             Ok(()) => {
                 let _ = self.go(inner, Event::TunnelUp);
+            }
+            Err(e) if e.code == ErrorCode::Cancelled => {
+                // The user disconnected or connected elsewhere: stop
+                // reconnecting and end like a disconnect.
+                let ks = inner.persisted.policy.kill_switch;
+                inner.spec = None;
+                let _ = self.go(inner, Event::DisconnectRequested);
+                let _ = self.go(inner, Event::TornDown { kill_switch: ks });
             }
             Err(e)
                 if matches!(
@@ -1405,6 +1492,12 @@ mod tests {
         ssh_exit: Option<String>,
         ssh_fail: Option<SshError>,
         violations: Vec<String>,
+        /// `ssh_up` blocks (like a server that never authenticates) until cancelled.
+        slow: bool,
+        /// What `ssh_missing` reports.
+        missing: Vec<Dependency>,
+        /// Upstreams passed to the last `ssh_up`.
+        upstreams: Vec<IpAddr>,
     }
 
     #[derive(Default)]
@@ -1482,7 +1575,16 @@ mod tests {
             assert_eq!(req.user, (SSH_UID, SSH_UID));
             assert!(req.socks_port != 0);
             assert_eq!(req.dns.servers, vec!["127.77.0.1".parse::<IpAddr>().unwrap()]);
+            if self.with(|s| s.slow) {
+                self.with(|s| s.log.push("ssh_up".into()));
+                // Same shape as wait_ready: poll until ready, ssh exit or cancel.
+                tokio::time::timeout(std::time::Duration::from_secs(30), req.cancel.cancelled())
+                    .await
+                    .expect("bring-up was never cancelled");
+                return Err(SshError::Cancelled);
+            }
             self.with(|s| {
+                s.upstreams = req.upstreams.clone();
                 s.log.push("ssh_up".into());
                 if let Some(e) = s.ssh_fail.take() {
                     return Err(e);
@@ -1498,13 +1600,23 @@ mod tests {
         async fn ssh_try_exited(&self) -> Option<String> {
             self.with(|s| s.ssh_exit.take())
         }
-        async fn keyscan(&self, user: (u32, u32), _host: IpAddr, _port: u16) -> Result<HostKey, String> {
+        async fn keyscan(
+            &self,
+            user: (u32, u32),
+            _host: IpAddr,
+            _port: u16,
+            cancel: &CancelToken,
+        ) -> Result<HostKey, String> {
             assert_eq!(user, (SSH_UID, SSH_UID));
             self.with(|s| s.log.push("keyscan".into()));
+            if self.with(|s| s.slow) {
+                cancel.cancelled().await;
+                return Err(SshError::Cancelled.to_string());
+            }
             Ok(host_key())
         }
-        async fn ssh_missing(&self, _user: (u32, u32)) -> Vec<String> {
-            Vec::new()
+        async fn ssh_missing(&self, _user: (u32, u32)) -> Vec<Dependency> {
+            self.with(|s| s.missing.clone())
         }
     }
 
@@ -1816,5 +1928,148 @@ mod tests {
         let e = t.engine.connect(spec).await.unwrap_err();
         assert_eq!(e.code, ErrorCode::InvalidConfig);
         assert!(!t.log().iter().any(|l| l == "ssh_up" || l == "keyscan"));
+    }
+
+    async fn wait_for_log(t: &T, what: &str) {
+        for _ in 0..500 {
+            if t.log().iter().any(|l| l == what) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("{what} never happened: {:?}", t.log());
+    }
+
+    fn kill_switch_held_throughout(t: &T) {
+        t.fake().with(|s| {
+            let first = s.applied.iter().position(|p| p.kill_switch).unwrap();
+            assert!(s.applied[first..].iter().all(|p| p.kill_switch));
+            assert!(s.applied.last().unwrap().tunnel.is_none());
+        });
+    }
+
+    #[tokio::test]
+    async fn disconnect_cancels_slow_ssh_bring_up_promptly() {
+        let t = engine(true).await;
+        t.fake().with(|s| s.slow = true);
+        let e = t.engine.clone();
+        let attempt = tokio::spawn(async move { e.connect(ssh_spec(Some(host_key()))).await });
+        wait_for_log(&t, "ssh_up").await;
+        assert_eq!(t.engine.status().state, ConnectionState::Connecting);
+        let started = std::time::Instant::now();
+        t.engine.disconnect().await.unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+        let e = attempt.await.unwrap().unwrap_err();
+        assert_eq!(e.code, ErrorCode::Cancelled);
+        assert_eq!(t.state().await, ConnectionState::Protected);
+        assert!(t.engine.status().last_error.is_none());
+        kill_switch_held_throughout(&t);
+        assert!(!t.engine.events.since(0).iter().any(|e| e.level == Lvl::Error));
+        // No reconnect loop afterwards.
+        t.engine.tick().await;
+        t.engine.tick().await;
+        assert_eq!(t.log().iter().filter(|l| *l == "ssh_up").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn disconnect_cancels_slow_keyscan_promptly() {
+        let t = engine(true).await;
+        t.fake().with(|s| s.slow = true);
+        let e = t.engine.clone();
+        let attempt = tokio::spawn(async move { e.connect(ssh_spec(None)).await });
+        wait_for_log(&t, "keyscan").await;
+        let started = std::time::Instant::now();
+        t.engine.disconnect().await.unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert_eq!(attempt.await.unwrap().unwrap_err().code, ErrorCode::Cancelled);
+        assert_eq!(t.state().await, ConnectionState::Protected);
+        kill_switch_held_throughout(&t);
+    }
+
+    #[tokio::test]
+    async fn disconnect_cancels_slow_reconnect_promptly() {
+        let t = engine(true).await;
+        t.engine.connect(ssh_spec(Some(host_key()))).await.unwrap();
+        t.fake().with(|s| {
+            s.ssh_exit = Some("ssh exited".into());
+            s.slow = true;
+        });
+        let e = t.engine.clone();
+        // Health check → Reconnecting → reconnect attempt that never finishes on its own.
+        let tick = tokio::spawn(async move { e.tick().await });
+        for _ in 0..500 {
+            if t.log().iter().filter(|l| *l == "ssh_up").count() == 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        // (The published status lags until the tick ends; the attempt is running.)
+        assert_eq!(t.log().iter().filter(|l| *l == "ssh_up").count(), 2);
+        let started = std::time::Instant::now();
+        t.engine.disconnect().await.unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        tick.await.unwrap();
+        assert_eq!(t.state().await, ConnectionState::Protected);
+        kill_switch_held_throughout(&t);
+        t.engine.tick().await;
+        assert_eq!(t.log().iter().filter(|l| *l == "ssh_up").count(), 2);
+    }
+
+    #[tokio::test]
+    async fn new_connect_supersedes_slow_ssh_bring_up() {
+        let t = engine(true).await;
+        t.fake().with(|s| s.slow = true);
+        let e = t.engine.clone();
+        let first = tokio::spawn(async move { e.connect(ssh_spec(Some(host_key()))).await });
+        wait_for_log(&t, "ssh_up").await;
+        t.fake().with(|s| s.slow = false);
+        tokio::time::timeout(std::time::Duration::from_secs(1), t.engine.connect(wg_spec()))
+            .await
+            .expect("second connect got the lock promptly")
+            .unwrap();
+        assert_eq!(first.await.unwrap().unwrap_err().code, ErrorCode::Cancelled);
+        assert_eq!(t.state().await, ConnectionState::Connected);
+    }
+
+    #[tokio::test]
+    async fn lan_custom_dns_is_dropped_with_a_warning() {
+        let t = engine(false).await;
+        t.engine
+            .set_policy(NetworkPolicy {
+                custom_dns: vec!["192.168.1.1".parse().unwrap()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        t.engine.connect(ssh_spec(Some(host_key()))).await.unwrap();
+        assert_eq!(
+            t.fake().with(|s| s.upstreams.clone()),
+            alizy_core::ssh::DEFAULT_SSH_DNS.to_vec()
+        );
+        let ev = t.engine.events.since(0);
+        let w = ev
+            .iter()
+            .find(|e| e.message.contains("can't be reached through an SSH tunnel"))
+            .expect("warning");
+        assert_eq!(w.level, Lvl::Warn);
+        assert!(w.message.contains("using 1.1.1.1, 9.9.9.9") && w.message.contains("192.168.1.1"));
+    }
+
+    #[tokio::test]
+    async fn system_report_uses_daemon_ssh_check() {
+        let t = engine(false).await;
+        t.fake().with(|s| s.missing = vec![Dependency::OpenSsh]);
+        let r = t.engine.system_report().await.unwrap();
+        assert_eq!(r.ssh_missing, vec![Dependency::OpenSsh]);
+        assert!(!r.ssh_ready);
+        // Without the alizy-ssh user the presence-only probe result stands.
+        let t = engine_with(None, false).await;
+        t.fake().with(|s| s.missing = vec![Dependency::OpenSsh]);
+        let r = t.engine.system_report().await.unwrap();
+        assert_eq!(r.ssh_ready, r.ssh_missing.is_empty());
     }
 }

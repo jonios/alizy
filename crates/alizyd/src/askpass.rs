@@ -85,6 +85,28 @@ fn remove_if_ours(path: &Path, ident: (u64, u64)) {
     }
 }
 
+/// Connect error when the daemon's own executable (the askpass helper) is gone.
+pub const DAEMON_UPGRADED: &str = "alizyd was upgraded; restart the alizyd service";
+
+/// The path ssh should exec as its askpass helper, from `current_exe()`.
+/// After an in-place upgrade without a restart the kernel reports the old
+/// image as "<path> (deleted)"; that suffix is stripped and the path must
+/// exist (`exists`), otherwise [`DAEMON_UPGRADED`] is returned instead of
+/// letting ssh fail to exec it (which would look like a rejected password).
+pub fn askpass_exe(current: PathBuf, exists: impl Fn(&Path) -> bool) -> io::Result<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let raw = current.as_os_str().as_bytes();
+    let path = match raw.strip_suffix(b" (deleted)") {
+        Some(p) => PathBuf::from(std::ffi::OsStr::from_bytes(p)),
+        None => current,
+    };
+    if exists(&path) {
+        Ok(path)
+    } else {
+        Err(io::Error::new(io::ErrorKind::NotFound, DAEMON_UPGRADED))
+    }
+}
+
 impl AskpassServer {
     pub async fn start(dir: &Path, id: &str, password: Zeroizing<String>, allowed_uid: u32) -> io::Result<Self> {
         if !safe_id(id) {
@@ -103,7 +125,7 @@ impl AskpassServer {
                 "password contains a line break",
             ));
         }
-        let exe = std::env::current_exe()?;
+        let exe = askpass_exe(std::env::current_exe()?, |p| p.is_file())?;
         let token = random_token()?;
         let path = dir.join(format!("{id}.askpass"));
         match std::fs::remove_file(&path) {
@@ -342,6 +364,28 @@ mod tests {
 
     fn uid() -> u32 {
         nix::unistd::getuid().as_raw()
+    }
+
+    #[test]
+    fn askpass_exe_strips_deleted_suffix_and_requires_the_path() {
+        let present = |p: &Path| p == Path::new("/usr/bin/alizyd");
+        assert_eq!(
+            askpass_exe("/usr/bin/alizyd (deleted)".into(), present).unwrap(),
+            PathBuf::from("/usr/bin/alizyd")
+        );
+        assert_eq!(
+            askpass_exe("/usr/bin/alizyd".into(), present).unwrap(),
+            PathBuf::from("/usr/bin/alizyd")
+        );
+        // Only a trailing suffix is stripped.
+        assert!(askpass_exe("/usr/bin/alizyd (deleted)/x".into(), present).is_err());
+        // Binary gone (uninstalled or moved): a clear error, not an auth failure.
+        let e = askpass_exe("/opt/alizy/alizyd (deleted)".into(), present).unwrap_err();
+        assert_eq!(e.to_string(), DAEMON_UPGRADED);
+        assert_eq!(e.kind(), io::ErrorKind::NotFound);
+        // The real filesystem check: the test binary exists.
+        let me = std::env::current_exe().unwrap();
+        assert_eq!(askpass_exe(me.clone(), |p| p.is_file()).unwrap(), me);
     }
 
     fn env_of(s: &AskpassServer, k: &str) -> String {

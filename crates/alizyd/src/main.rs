@@ -7,6 +7,8 @@ mod askpass;
 #[cfg(target_os = "linux")]
 mod auth;
 #[cfg(target_os = "linux")]
+mod cancel;
+#[cfg(target_os = "linux")]
 mod engine;
 #[cfg(target_os = "linux")]
 mod events;

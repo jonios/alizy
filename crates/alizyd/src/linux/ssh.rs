@@ -15,11 +15,12 @@
 //! is never logged either.
 
 use crate::askpass::AskpassServer;
+use crate::cancel::CancelToken;
 use crate::exec::{argv, run};
-use crate::socks_dns::{socks5_connect, DnsForwarder};
+use crate::socks_dns::{socks5_greeting, DnsForwarder};
 use alizy_core::ipc::{ErrorCode, TunnelStats};
 use alizy_core::routing::{DnsPlan, RoutePlan, SSH_DNS_FORWARDER, SSH_NETIF_V4, SSH_NETIF_V6};
-use alizy_core::ssh::{HostKey, SshConfig, SshPublic, DEFAULT_SSH_DNS};
+use alizy_core::ssh::{HostKey, SshConfig, SshPublic};
 use alizy_core::sysprobe::{find_exe, SAFE_PATH};
 use std::collections::VecDeque;
 use std::io;
@@ -41,10 +42,10 @@ pub const SSH_EXE: &str = "ssh";
 pub const KEYSCAN_EXE: &str = "ssh-keyscan";
 pub const TUN2SOCKS_EXE: &str = "badvpn-tun2socks";
 
-/// The SSH connection must carry a SOCKS request within this time.
+/// ssh must authenticate and open its SOCKS listener within this time.
 const READY_DEADLINE: Duration = Duration::from_secs(20);
 const READY_POLL: Duration = Duration::from_millis(250);
-/// One readiness probe (`socks5_connect` has no timeout of its own).
+/// One readiness probe (`socks5_greeting` has no timeout of its own).
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 /// Overall cap on one `ssh-keyscan` run (each connection is also capped by `-T 8`).
 const KEYSCAN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -64,6 +65,9 @@ pub enum SshError {
     MissingDependency(String),
     #[error("{0}")]
     Other(String),
+    /// The user disconnected (or connected elsewhere) during bring-up.
+    #[error("the connection attempt was cancelled")]
+    Cancelled,
 }
 
 impl SshError {
@@ -73,6 +77,7 @@ impl SshError {
             Self::AuthFailed => ErrorCode::AuthFailed,
             Self::MissingDependency(_) => ErrorCode::MissingDependency,
             Self::Other(_) => ErrorCode::Tunnel,
+            Self::Cancelled => ErrorCode::Cancelled,
         }
     }
 
@@ -121,6 +126,8 @@ pub struct SshUp<'a> {
     pub ipv6: bool,
     pub routes: &'a RoutePlan,
     pub dns: &'a DnsPlan,
+    /// Bumped by the engine (without its lock) when the user disconnects.
+    pub cancel: CancelToken,
 }
 
 /// Bounded tail of a child's stderr.
@@ -450,16 +457,19 @@ async fn ssh_version(exe: &str, user: (u32, u32)) -> Option<String> {
     })
 }
 
-/// Fetch the server's host key as `alizy-ssh`.
-pub async fn keyscan(user: (u32, u32), host: IpAddr, port: u16) -> Result<HostKey, String> {
+/// Fetch the server's host key as `alizy-ssh`. Gives up (killing ssh-keyscan)
+/// as soon as `cancel` fires.
+pub async fn keyscan(user: (u32, u32), host: IpAddr, port: u16, cancel: &CancelToken) -> Result<HostKey, String> {
     check_user(user)?;
     let exe = find_exe(KEYSCAN_EXE).ok_or("ssh-keyscan is not installed")?;
     let mut c = unprivileged_command(&exe, &keyscan_argv(host, port), user, Path::new("/"), &[]);
     c.stdout(Stdio::piped());
-    let out = tokio::time::timeout(KEYSCAN_TIMEOUT, c.output())
-        .await
-        .map_err(|_| "ssh-keyscan timed out".to_string())?
-        .map_err(|e| format!("could not run ssh-keyscan: {e}"))?;
+    let out = tokio::select! {
+        r = tokio::time::timeout(KEYSCAN_TIMEOUT, c.output()) => r,
+        () = cancel.cancelled() => return Err(SshError::Cancelled.to_string()),
+    }
+    .map_err(|_| "ssh-keyscan timed out".to_string())?
+    .map_err(|e| format!("could not run ssh-keyscan: {e}"))?;
     parse_keyscan(&String::from_utf8_lossy(&out.stdout))
         .ok_or_else(|| format!("{host} port {port} did not present a usable SSH host key"))
 }
@@ -518,7 +528,7 @@ async fn start_children(
     let id = alizy_core::ssh::fingerprint(p);
     let askpass = AskpassServer::start(req.runtime, &id, req.cfg.password.clone(), req.user.0)
         .await
-        .map_err(|e| SshError::Other(format!("could not start the password helper: {e}")))?;
+        .map_err(|e| SshError::Other(askpass_error(&e)))?;
     let mut cmd = unprivileged_command(
         ssh_exe,
         &ssh_argv(req.cfg, req.socks_port, req.runtime),
@@ -561,7 +571,7 @@ async fn start_children(
     let socks = SocketAddr::from((Ipv4Addr::LOCALHOST, req.socks_port));
     let dns = DnsForwarder::start(SSH_DNS_FORWARDER, socks, req.upstreams.clone())
         .await
-        .map_err(|e| SshError::Other(format!("could not start the DNS forwarder on {SSH_DNS_FORWARDER}: {e}")))?;
+        .map_err(|e| SshError::Other(forwarder_error(&e)))?;
     tracing::debug!(listen = %dns.local_addr(), "SSH tunnel DNS forwarder started");
     Ok(SshTunnel {
         ssh,
@@ -576,6 +586,28 @@ async fn start_children(
     })
 }
 
+/// Connect error for a failed askpass start. An upgraded-away daemon binary
+/// gets its own message (it is not an authentication problem).
+fn askpass_error(e: &io::Error) -> String {
+    if e.to_string() == crate::askpass::DAEMON_UPGRADED {
+        crate::askpass::DAEMON_UPGRADED.to_string()
+    } else {
+        format!("could not start the password helper: {e}")
+    }
+}
+
+/// Connect error for a failed DNS forwarder bind on 127.77.0.1:53.
+fn forwarder_error(e: &io::Error) -> String {
+    if e.kind() == io::ErrorKind::AddrInUse {
+        format!(
+            "port 53 on {} is in use by another DNS service (e.g. dnsmasq); SSH profiles need it",
+            SSH_DNS_FORWARDER.ip()
+        )
+    } else {
+        format!("could not start the DNS forwarder on {SSH_DNS_FORWARDER}: {e}")
+    }
+}
+
 fn suffix(stderr: &str) -> String {
     match last_line(stderr) {
         "" => String::new(),
@@ -583,12 +615,18 @@ fn suffix(stderr: &str) -> String {
     }
 }
 
-/// Poll until a SOCKS CONNECT through ssh succeeds; abort as soon as ssh exits.
+/// Poll until ssh's SOCKS listener answers a SOCKS5 greeting (ssh opens the
+/// `-D` listener only after authentication succeeded) and that listener
+/// belongs to alizy-ssh. Nothing is connected through the server, so a
+/// resolver the server can't reach doesn't make the tunnel look broken.
+/// Aborts as soon as ssh exits or `req.cancel` fires.
 async fn wait_ready(req: &SshUp<'_>, ssh: &mut Child, err: &TailBuf, reader: JoinHandle<()>) -> Result<(), SshError> {
     let socks = SocketAddr::from((Ipv4Addr::LOCALHOST, req.socks_port));
-    let dst = SocketAddr::new(req.upstreams.first().copied().unwrap_or(DEFAULT_SSH_DNS[0]), 53);
     let deadline = tokio::time::Instant::now() + READY_DEADLINE;
     loop {
+        if req.cancel.is_cancelled() {
+            return Err(SshError::Cancelled);
+        }
         match ssh.try_wait() {
             Ok(Some(status)) => {
                 // Let the reader drain what ssh printed before it exited.
@@ -598,7 +636,11 @@ async fn wait_ready(req: &SshUp<'_>, ssh: &mut Child, err: &TailBuf, reader: Joi
             Ok(None) => {}
             Err(e) => return Err(SshError::Other(format!("ssh: {e}"))),
         }
-        if let Ok(Ok(_conn)) = tokio::time::timeout(PROBE_TIMEOUT, socks5_connect(socks, dst)).await {
+        let probe = tokio::select! {
+            r = tokio::time::timeout(PROBE_TIMEOUT, socks5_greeting(socks)) => matches!(r, Ok(Ok(()))),
+            () = req.cancel.cancelled() => return Err(SshError::Cancelled),
+        };
+        if probe {
             // Something spoke SOCKS on the port; make sure it is ssh (alizy-ssh)
             // and not a local user who bound the port first. The firewall also
             // rejects other uids sending from this port; this is the second lock.
@@ -617,7 +659,10 @@ async fn wait_ready(req: &SshUp<'_>, ssh: &mut Child, err: &TailBuf, reader: Joi
                 suffix(&err.text())
             )));
         }
-        tokio::time::sleep(READY_POLL).await;
+        tokio::select! {
+            () = tokio::time::sleep(READY_POLL) => {}
+            () = req.cancel.cancelled() => return Err(SshError::Cancelled),
+        }
     }
 }
 
@@ -625,11 +670,13 @@ async fn exit_error(req: &SshUp<'_>, stderr: &str, status: &str) -> SshError {
     let p = &req.cfg.public;
     match classify_ssh_stderr(stderr) {
         Some(StderrClass::AuthFailed) => SshError::AuthFailed,
-        Some(StderrClass::HostKeyChanged) => host_key_failure(
-            p.host_key.as_ref(),
-            keyscan(req.user, p.host, p.port).await,
-            req.runtime,
-        ),
+        Some(StderrClass::HostKeyChanged) => {
+            let scanned = keyscan(req.user, p.host, p.port, &req.cancel).await;
+            if req.cancel.is_cancelled() {
+                return SshError::Cancelled;
+            }
+            host_key_failure(p.host_key.as_ref(), scanned, req.runtime)
+        }
         None => SshError::Other(format!("ssh exited ({status}){}", suffix(stderr))),
     }
 }
@@ -1106,6 +1153,48 @@ mod tests {
             .unwrap();
         assert!(!st.success());
         t.stop().await;
+    }
+
+    #[test]
+    fn forwarder_bind_conflict_has_a_clear_message() {
+        let e = forwarder_error(&io::Error::from(io::ErrorKind::AddrInUse));
+        assert_eq!(
+            e,
+            "port 53 on 127.77.0.1 is in use by another DNS service (e.g. dnsmasq); SSH profiles need it"
+        );
+        let e = forwarder_error(&io::Error::from(io::ErrorKind::PermissionDenied));
+        assert!(
+            e.starts_with("could not start the DNS forwarder on 127.77.0.1:53: "),
+            "{e}"
+        );
+    }
+
+    #[tokio::test]
+    async fn real_forwarder_bind_conflict_maps_to_clear_message() {
+        // Rootless stand-in for 127.77.0.1:53: occupy a loopback port, then bind it again.
+        let busy = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = busy.local_addr().unwrap();
+        let _tcp = tokio::net::TcpListener::bind(addr).await.unwrap();
+        let e = DnsForwarder::start(addr, "127.0.0.1:9".parse().unwrap(), vec![])
+            .await
+            .err()
+            .expect("bind conflict");
+        assert_eq!(e.kind(), io::ErrorKind::AddrInUse);
+        assert!(forwarder_error(&e).contains("in use by another DNS service"));
+    }
+
+    #[test]
+    fn askpass_upgrade_error_is_not_wrapped() {
+        let e = io::Error::new(io::ErrorKind::NotFound, crate::askpass::DAEMON_UPGRADED);
+        assert_eq!(askpass_error(&e), crate::askpass::DAEMON_UPGRADED);
+        assert_eq!(SshError::Other(askpass_error(&e)).code(), ErrorCode::Tunnel);
+        let e = io::Error::other("boom");
+        assert_eq!(askpass_error(&e), "could not start the password helper: boom");
+    }
+
+    #[test]
+    fn cancelled_maps_to_cancelled_code() {
+        assert_eq!(SshError::Cancelled.code(), ErrorCode::Cancelled);
     }
 
     #[test]

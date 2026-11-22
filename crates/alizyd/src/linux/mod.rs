@@ -17,7 +17,7 @@ use alizy_core::ipc::TunnelStats;
 use alizy_core::platform::{AdapterResult, PlatformAdapter};
 use alizy_core::routing::{split_rule_commands, teardown_commands, DnsPlan, RoutePlan};
 use alizy_core::ssh::HostKey;
-use alizy_core::sysprobe::DnsBackend;
+use alizy_core::sysprobe::{Dependency, DnsBackend};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -242,15 +242,17 @@ impl Backend for LinuxAdapter {
         self.ssh.lock().await.as_mut().and_then(ssh::SshTunnel::try_exited)
     }
 
-    async fn keyscan(&self, user: (u32, u32), host: IpAddr, port: u16) -> Result<HostKey, String> {
-        ssh::keyscan(user, host, port).await
+    async fn keyscan(
+        &self,
+        user: (u32, u32),
+        host: IpAddr,
+        port: u16,
+        cancel: &crate::cancel::CancelToken,
+    ) -> Result<HostKey, String> {
+        ssh::keyscan(user, host, port, cancel).await
     }
 
-    async fn ssh_missing(&self, user: (u32, u32)) -> Vec<String> {
-        ssh::missing_deps(user)
-            .await
-            .iter()
-            .map(|d| d.label().to_string())
-            .collect()
+    async fn ssh_missing(&self, user: (u32, u32)) -> Vec<Dependency> {
+        ssh::missing_deps(user).await
     }
 }
