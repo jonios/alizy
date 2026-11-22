@@ -1,0 +1,57 @@
+# Maintainer: Alizy developers
+# Split package: `alizyd` (privileged service) and `alizy` (unprivileged GUI).
+# Build from a local checkout:  cd packaging/arch && makepkg -si
+pkgbase=alizy
+pkgname=(alizyd alizy)
+pkgver=0.1.0
+pkgrel=6
+pkgdesc="WireGuard desktop client with an OS-level nftables kill switch"
+arch=('x86_64' 'aarch64')
+url="https://github.com/alizy/alizy"
+license=('GPL-3.0-or-later')
+makedepends=('cargo' 'nodejs' 'npm' 'webkit2gtk-4.1' 'libayatana-appindicator')
+options=('!lto')
+source=()
+sha256sums=()
+
+_src() { realpath "$startdir/../.."; }
+
+build() {
+  cd "$(_src)"
+  export CARGO_TARGET_DIR="$srcdir/target"
+  npm ci
+  cargo build --release --locked -p alizyd
+  npx tauri build --no-bundle -- --locked
+}
+
+check() {
+  cd "$(_src)"
+  export CARGO_TARGET_DIR="$srcdir/target"
+  cargo test --release --locked -p alizy-core -p alizy-store -p alizyd
+}
+
+package_alizyd() {
+  pkgdesc="Alizy privileged service: WireGuard tunnels, nftables kill switch, DNS and split tunnelling"
+  depends=('wireguard-tools' 'nftables' 'iproute2' 'polkit' 'systemd')
+  optdepends=('openresolv: DNS management on systems without systemd-resolved')
+  install=alizyd.install
+  local s; s="$(_src)"
+  install -Dm755 "$srcdir/target/release/alizyd" "$pkgdir/usr/bin/alizyd"
+  install -Dm644 "$s/packaging/linux/alizyd.service" "$pkgdir/usr/lib/systemd/system/alizyd.service"
+  install -Dm644 "$s/packaging/linux/alizy.sysusers" "$pkgdir/usr/lib/sysusers.d/alizy.conf"
+  install -Dm644 "$s/packaging/linux/io.alizy.policy" "$pkgdir/usr/share/polkit-1/actions/io.alizy.policy"
+  install -Dm644 "$s/SECURITY.md" "$pkgdir/usr/share/doc/alizy/SECURITY.md"
+}
+
+package_alizy() {
+  pkgdesc="Alizy WireGuard desktop client (GUI, runs unprivileged)"
+  depends=('alizyd' 'webkit2gtk-4.1' 'gtk3')
+  optdepends=('libayatana-appindicator: system tray icon'
+              'gnome-keyring: secure private-key storage (or any Secret Service provider such as KWallet)')
+  local s; s="$(_src)"
+  install -Dm755 "$srcdir/target/release/alizy" "$pkgdir/usr/bin/alizy"
+  install -Dm644 "$s/packaging/linux/io.alizy.app.desktop" "$pkgdir/usr/share/applications/io.alizy.app.desktop"
+  install -Dm644 "$s/src-tauri/icons/128x128.png" "$pkgdir/usr/share/icons/hicolor/128x128/apps/io.alizy.app.png"
+  install -Dm644 "$s/src-tauri/icons/32x32.png" "$pkgdir/usr/share/icons/hicolor/32x32/apps/io.alizy.app.png"
+  install -Dm644 "$s/README.md" "$pkgdir/usr/share/doc/alizy/README.md"
+}

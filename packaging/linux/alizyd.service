@@ -1,0 +1,47 @@
+[Unit]
+Description=Alizy VPN service (WireGuard tunnels, kill switch, split tunnelling)
+Documentation=https://github.com/alizy/alizy
+# Start before networking so the kill switch is enforced from early boot.
+DefaultDependencies=no
+After=local-fs.target systemd-sysusers.service
+Before=network-pre.target shutdown.target
+Wants=network-pre.target
+Conflicts=shutdown.target
+
+[Service]
+# Ready only after the firewall is applied and verified (sd_notify), so
+# network-pre.target waits for the kill switch.
+Type=notify
+NotifyAccess=main
+TimeoutStartSec=30
+ExecStart=/usr/bin/alizyd
+Restart=always
+RestartSec=1
+# /run/alizy holds the IPC socket (socket itself is 0660 root:alizy).
+RuntimeDirectory=alizy
+RuntimeDirectoryMode=0755
+StateDirectory=alizy
+StateDirectoryMode=0700
+# Hardening. The service needs CAP_NET_ADMIN (links, routes, nftables) and
+# write access to /etc/resolv.conf only on systems without systemd-resolved.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_CHOWN
+# The daemon holds private keys in memory while connected: no core dumps.
+LimitCORE=0
+LimitNOFILE=4096
+NoNewPrivileges=yes
+ProtectSystem=true
+ProtectHome=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectKernelModules=no
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

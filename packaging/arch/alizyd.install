@@ -1,0 +1,15 @@
+post_install() {
+  systemctl daemon-reload
+  echo ">>> Enable the service:        sudo systemctl enable --now alizyd"
+  echo ">>> Allow your user to use it: sudo usermod -aG alizy \$USER"
+  echo ">>> Then REBOOT (a re-login is not enough when the systemd user manager"
+  echo ">>> lingers, e.g. loginctl enable-linger / uwsm sessions)."
+}
+post_upgrade() {
+  systemctl daemon-reload
+  systemctl try-restart alizyd.service
+}
+pre_remove() {
+  systemctl disable --now alizyd.service 2>/dev/null || true
+  /usr/bin/alizyd --remove-firewall 2>/dev/null || true
+}

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Alizy
+GenericName=WireGuard VPN client
+Comment=Secure WireGuard client with an OS-level kill switch
+Exec=alizy
+Icon=io.alizy.app
+Terminal=false
+Categories=Network;Security;
+Keywords=vpn;wireguard;privacy;
+StartupWMClass=alizy

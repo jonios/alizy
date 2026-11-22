@@ -1,0 +1,32 @@
+[package]
+name = "alizy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Alizy WireGuard desktop client (unprivileged GUI)"
+
+[lib]
+name = "alizy_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+alizy-core.workspace = true
+alizy-store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+zeroize.workspace = true
+uuid.workspace = true
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-single-instance = "2"
+ureq = "2"
+nix = { version = "0.30", features = ["user"] }

@@ -1,0 +1,16 @@
+/target
+node_modules
+/dist
+src-tauri/gen
+*.log
+# makepkg build output
+/packaging/arch/src/
+/packaging/arch/pkg/
+*.pkg.tar.zst
+*.pkg.tar.zst.sig
+# local validation output (may contain host network details)
+/target/system-validation/
+# subagent-driven-development scratch
+/.superpowers/
+# git worktrees
+/.worktrees/

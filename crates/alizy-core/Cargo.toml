@@ -1,0 +1,17 @@
+[package]
+name = "alizy-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Platform-neutral core logic for Alizy: config parsing, validation, firewall/routing plans, state machine, IPC protocol."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+base64.workspace = true
+zeroize.workspace = true
+ipnet.workspace = true
+sha2.workspace = true
+hex.workspace = true
+x25519-dalek = { version = "2", features = ["static_secrets"] }
