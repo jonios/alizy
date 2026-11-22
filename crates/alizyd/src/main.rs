@@ -3,6 +3,8 @@
 //! The GUI never runs as root; it talks to this daemon over a Unix socket.
 
 #[cfg(target_os = "linux")]
+mod askpass;
+#[cfg(target_os = "linux")]
 mod auth;
 #[cfg(target_os = "linux")]
 mod engine;
@@ -26,9 +28,20 @@ fn main() {
 }
 
 #[cfg(target_os = "linux")]
-#[tokio::main]
-async fn main() {
-    if let Err(e) = linux_main::run().await {
+fn main() {
+    // ssh runs `alizyd --askpass <prompt>` as the unprivileged alizy-ssh user.
+    // Handle it before any logging, runtime or root-only setup.
+    if std::env::args_os().nth(1).is_some_and(|a| a == "--askpass") {
+        std::process::exit(askpass::run_client());
+    }
+    let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("alizyd: cannot start async runtime: {e}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = rt.block_on(linux_main::run()) {
         eprintln!("alizyd: {e:#}");
         std::process::exit(1);
     }
@@ -52,6 +65,7 @@ mod linux_main {
     const USAGE: &str = "usage: alizyd [--socket PATH] [--state-dir DIR] [--auth polkit|same-uid] [--group NAME]
               [--iface NAME] [--dns-backend auto|systemd-resolved|resolvconf|file|none]
               [--resolv-conf PATH]
+       alizyd --askpass PROMPT    (internal) SSH_ASKPASS helper run by ssh
        alizyd --probe             print the system compatibility report (JSON)
        alizyd --remove-firewall   remove Alizy's nftables table, routing rules and interface
        alizyd --version";
