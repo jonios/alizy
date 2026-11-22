@@ -328,12 +328,44 @@ pub fn ssh_dns_plan(_policy: &NetworkPolicy) -> DnsPlan {
 /// profile's (or default) servers, limited to enabled IP families. If that
 /// filtering leaves nothing, fall back to the unfiltered list's IPv4 entries,
 /// and finally to the unfiltered list, so the forwarder always has an upstream.
+///
+/// Queries are sent from the SSH server's side, so `custom_dns` entries on
+/// the local network (see [`is_local_network_addr`]) can't be reached and are
+/// dropped; see [`ssh_upstream_plan`] for the dropped list.
 pub fn ssh_upstreams(p: &SshPublic, policy: &NetworkPolicy) -> Vec<IpAddr> {
-    let all = if policy.custom_dns.is_empty() {
-        p.dns_servers()
-    } else {
-        policy.custom_dns.clone()
-    };
+    ssh_upstream_plan(p, policy).servers
+}
+
+/// Forwarder upstreams plus the `custom_dns` entries dropped because they are
+/// local-network addresses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SshUpstreams {
+    pub servers: Vec<IpAddr>,
+    pub dropped: Vec<IpAddr>,
+}
+
+/// Loopback, unspecified, RFC 1918 private, link-local (v4 and v6) and
+/// unique-local (fc00::/7) addresses, including their IPv4-mapped forms:
+/// addresses that mean something only on this host or its LAN.
+pub fn is_local_network_addr(ip: IpAddr) -> bool {
+    match ip.to_canonical() {
+        IpAddr::V4(a) => a.is_loopback() || a.is_unspecified() || a.is_private() || a.is_link_local(),
+        IpAddr::V6(a) => {
+            a.is_loopback()
+                || a.is_unspecified()
+                || (a.segments()[0] & 0xfe00) == 0xfc00
+                || (a.segments()[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+pub fn ssh_upstream_plan(p: &SshPublic, policy: &NetworkPolicy) -> SshUpstreams {
+    let (remote, dropped): (Vec<IpAddr>, Vec<IpAddr>) = policy
+        .custom_dns
+        .iter()
+        .copied()
+        .partition(|ip| !is_local_network_addr(*ip));
+    let all = if remote.is_empty() { p.dns_servers() } else { remote };
     let filtered: Vec<IpAddr> = all
         .iter()
         .copied()
@@ -342,15 +374,17 @@ pub fn ssh_upstreams(p: &SshPublic, policy: &NetworkPolicy) -> Vec<IpAddr> {
             IpAddr::V6(_) => policy.ipv6_enabled,
         })
         .collect();
-    if !filtered.is_empty() {
-        return filtered;
-    }
-    let v4: Vec<IpAddr> = all.iter().copied().filter(IpAddr::is_ipv4).collect();
-    if v4.is_empty() {
-        all
+    let servers = if !filtered.is_empty() {
+        filtered
     } else {
-        v4
-    }
+        let v4: Vec<IpAddr> = all.iter().copied().filter(IpAddr::is_ipv4).collect();
+        if v4.is_empty() {
+            all
+        } else {
+            v4
+        }
+    };
+    SshUpstreams { servers, dropped }
 }
 
 #[cfg(test)]
@@ -505,5 +539,65 @@ mod tests {
         assert_eq!(ssh_upstreams(&p, &pol), vec!["1.1.1.1".parse::<IpAddr>().unwrap()]);
         p.dns = vec!["2606:4700:4700::1111".parse().unwrap()];
         assert_eq!(ssh_upstreams(&p, &pol), p.dns);
+    }
+
+    #[test]
+    fn ssh_upstreams_drop_local_network_custom_dns() {
+        let mut p = ssh();
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        // Only LAN resolvers: dropped, profile DNS (here the defaults) used instead.
+        let pol = NetworkPolicy {
+            custom_dns: vec![ip("192.168.1.1"), ip("fd00::53"), ip("fe80::1"), ip("127.0.0.53")],
+            ..Default::default()
+        };
+        let r = ssh_upstream_plan(&p, &pol);
+        assert_eq!(r.servers, DEFAULT_SSH_DNS.to_vec());
+        assert_eq!(r.dropped, pol.custom_dns);
+        p.dns = vec![ip("8.8.8.8")];
+        assert_eq!(ssh_upstreams(&p, &pol), vec![ip("8.8.8.8")]);
+        // Mixed: the public entries are kept, the private ones reported.
+        let pol = NetworkPolicy {
+            custom_dns: vec![ip("10.0.0.1"), ip("9.9.9.9"), ip("169.254.1.1")],
+            ..Default::default()
+        };
+        let r = ssh_upstream_plan(&p, &pol);
+        assert_eq!(r.servers, vec![ip("9.9.9.9")]);
+        assert_eq!(r.dropped, vec![ip("10.0.0.1"), ip("169.254.1.1")]);
+        // Nothing local: nothing dropped.
+        let pol = NetworkPolicy {
+            custom_dns: vec![ip("9.9.9.9")],
+            ..Default::default()
+        };
+        assert!(ssh_upstream_plan(&p, &pol).dropped.is_empty());
+    }
+
+    #[test]
+    fn local_network_addresses() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        for a in [
+            "10.1.2.3",
+            "172.16.0.1",
+            "192.168.0.1",
+            "169.254.0.1",
+            "127.0.0.1",
+            "0.0.0.0",
+            "::1",
+            "::",
+            "fc00::1",
+            "fd12::1",
+            "fe80::1",
+            "::ffff:192.168.1.1",
+        ] {
+            assert!(is_local_network_addr(ip(a)), "{a}");
+        }
+        for a in [
+            "1.1.1.1",
+            "8.8.8.8",
+            "100.64.0.1",
+            "2606:4700:4700::1111",
+            "::ffff:1.1.1.1",
+        ] {
+            assert!(!is_local_network_addr(ip(a)), "{a}");
+        }
     }
 }

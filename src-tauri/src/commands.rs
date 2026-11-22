@@ -385,9 +385,14 @@ pub async fn profile_duplicate(app: AppHandle, st: S<'_>, id: String) -> R<Profi
     Ok(ProfileSummary::from(&row))
 }
 
+/// Parse the server address. An IPv4-mapped IPv6 address (`::ffff:a.b.c.d`)
+/// is stored as the plain IPv4 address: ssh would connect over IPv4 anyway,
+/// and the core validation (which rejects mapped addresses) then applies the
+/// IPv4 rules, e.g. to a mapped loopback.
 fn parse_host(host: &str) -> R<std::net::IpAddr> {
     host.trim()
-        .parse()
+        .parse::<std::net::IpAddr>()
+        .map(|ip| ip.to_canonical())
         .map_err(|_| "Server IP Address must be an IPv4 or IPv6 address".to_string())
 }
 
@@ -599,6 +604,7 @@ impl From<alizy_core::ipc::IpcError> for ConnectError {
             ErrorCode::HostKeyChanged => "host_key_changed",
             ErrorCode::AuthFailed => "auth_failed",
             ErrorCode::MissingDependency => "missing_dependency",
+            ErrorCode::Cancelled => "cancelled",
         };
         let fingerprint = err.host_key.as_ref().map(HostKey::fingerprint_sha256);
         Self {
@@ -1031,6 +1037,7 @@ mod ssh_tests {
             (HostKeyChanged, "host_key_changed"),
             (AuthFailed, "auth_failed"),
             (MissingDependency, "missing_dependency"),
+            (Cancelled, "cancelled"),
         ];
         for (code, name) in cases {
             // must agree with the daemon's serde name
@@ -1064,5 +1071,33 @@ mod ssh_tests {
         assert!(parse_host("::1").is_ok());
         let err = parse_host("example.com").unwrap_err();
         assert_eq!(err, "Server IP Address must be an IPv4 or IPv6 address");
+    }
+
+    #[test]
+    fn host_parse_canonicalises_ipv4_mapped() {
+        let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+        assert_eq!(parse_host("::ffff:192.0.2.1").unwrap(), ip("192.0.2.1"));
+        assert_eq!(parse_host(" ::FFFF:c000:0201 ").unwrap(), ip("192.0.2.1"));
+        // Real IPv6 stays IPv6.
+        assert_eq!(parse_host("2001:db8::1").unwrap(), ip("2001:db8::1"));
+        // A mapped loopback becomes 127.0.0.1 and is then rejected by the core rules.
+        let public = SshPublic {
+            host: parse_host("::ffff:127.0.0.1").unwrap(),
+            port: 22,
+            username: "alice".into(),
+            host_key: None,
+            dns: vec![],
+        };
+        assert_eq!(public.host, ip("127.0.0.1"));
+        assert!(alizy_core::ssh::validate_public(&public).is_err());
+        // Without canonicalisation core refuses the mapped form outright.
+        let mapped = SshPublic {
+            host: ip("::ffff:192.0.2.1"),
+            ..public
+        };
+        assert_eq!(
+            alizy_core::ssh::validate_public(&mapped).unwrap_err(),
+            alizy_core::ssh::MAPPED_HOST_ERROR
+        );
     }
 }

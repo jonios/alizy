@@ -81,6 +81,9 @@ pub enum ErrorCode {
     HostKeyChanged,
     AuthFailed,
     MissingDependency,
+    /// A connection attempt was abandoned because the user disconnected or
+    /// started another connection meanwhile. Not a failure.
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
@@ -341,6 +344,7 @@ mod ssh_ipc_tests {
             ErrorCode::HostKeyChanged,
             ErrorCode::AuthFailed,
             ErrorCode::MissingDependency,
+            ErrorCode::Cancelled,
         ] {
             let j = serde_json::to_string(&c).unwrap();
             assert_eq!(serde_json::from_str::<ErrorCode>(&j).unwrap(), c);

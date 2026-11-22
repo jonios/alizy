@@ -283,7 +283,9 @@ pub fn openssh_version_ok(ssh_v_output: &str) -> bool {
     (major, minor) >= (8, 4)
 }
 
-/// Pure SSH dependency check. `ssh_v` is the `ssh -V` output when it could be obtained.
+/// Pure SSH dependency check. `ssh_v` is the `ssh -V` output when it could be
+/// obtained; `None` (no output, timed out) counts OpenSSH as missing. The
+/// daemon calls this with `ssh -V` run as alizy-ssh.
 pub fn compute_ssh_missing(has_exe: impl Fn(&str) -> bool, ssh_v: Option<&str>) -> Vec<Dependency> {
     let mut missing = Vec::new();
     let openssh_ok = has_exe("ssh") && has_exe("ssh-keyscan") && ssh_v.map(openssh_version_ok).unwrap_or(false);
@@ -296,20 +298,20 @@ pub fn compute_ssh_missing(has_exe: impl Fn(&str) -> bool, ssh_v: Option<&str>) 
     missing
 }
 
-/// `ssh -V` prints to stderr, e.g. `OpenSSH_9.6p1, OpenSSL 3.0.13`.
-fn ssh_version_output(ssh_path: &str) -> Option<String> {
-    let out = std::process::Command::new(ssh_path)
-        .arg("-V")
-        .env_clear()
-        .env("PATH", SAFE_PATH)
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&out.stderr).into_owned();
-    if text.trim().is_empty() {
-        Some(String::from_utf8_lossy(&out.stdout).into_owned())
-    } else {
-        Some(text)
+/// Presence-only SSH dependency check, used by [`probe`]: it never executes
+/// ssh (`probe` may run as root). An installed ssh of unknown version is
+/// *not* reported missing; the daemon replaces this with the versioned check
+/// ([`compute_ssh_missing`] fed by `ssh -V` run as alizy-ssh) via
+/// [`SystemReport::set_ssh_missing`].
+pub fn compute_ssh_missing_unversioned(has_exe: impl Fn(&str) -> bool) -> Vec<Dependency> {
+    let mut missing = Vec::new();
+    if !(has_exe("ssh") && has_exe("ssh-keyscan")) {
+        missing.push(Dependency::OpenSsh);
     }
+    if !has_exe("badvpn-tun2socks") {
+        missing.push(Dependency::Tun2Socks);
+    }
+    missing
 }
 
 /// Fixed search path. The daemon never inherits PATH from a caller.
@@ -414,12 +416,7 @@ pub fn probe() -> SystemReport {
         .map(|p| p.to_string_lossy().into_owned());
     let dns_backend = choose_dns_backend(resolved_active, resolv_conf_target.as_deref(), has("resolvconf"));
     let kw = kernel_wireguard(&kernel);
-    let ssh_v = executables
-        .get("ssh")
-        .cloned()
-        .flatten()
-        .and_then(|p| ssh_version_output(&p));
-    let ssh_missing = compute_ssh_missing(has, ssh_v.as_deref());
+    let ssh_missing = compute_ssh_missing_unversioned(has);
     let mut report = SystemReport {
         firewalld_active: systemd && systemctl_active("firewalld.service"),
         ufw_active: ufw_enabled(),
@@ -441,6 +438,16 @@ pub fn probe() -> SystemReport {
     };
     report.findings = analyse(&report);
     report
+}
+
+impl SystemReport {
+    /// Replace the SSH dependency result (e.g. with the daemon's versioned
+    /// check) and recompute `ssh_ready` and the findings.
+    pub fn set_ssh_missing(&mut self, missing: Vec<Dependency>) {
+        self.ssh_ready = missing.is_empty();
+        self.ssh_missing = missing;
+        self.findings = analyse(self);
+    }
 }
 
 /// Turn raw facts into actionable findings with exact missing requirements.
@@ -524,8 +531,9 @@ pub fn analyse(r: &SystemReport) -> Vec<Finding> {
             message.push_str(" OpenSSH 8.4 or newer required.");
         }
         message.push_str(" WireGuard profiles are unaffected.");
+        // Optional feature: informational, so WireGuard-only users see no warning.
         f.push(Finding {
-            severity: Severity::Warning,
+            severity: Severity::Info,
             message,
             fix: pm.install_command(&r.ssh_missing),
         });
@@ -676,15 +684,16 @@ mod tests {
     }
 
     #[test]
-    fn ssh_missing_is_warning_not_blocker() {
+    fn ssh_missing_is_info_not_warning_or_blocker() {
         let r = report_with_ssh_missing(PackageManager::Pacman, vec![Dependency::OpenSsh, Dependency::Tun2Socks]);
         let f = analyse(&r);
         assert!(!f.iter().any(|x| x.severity == Severity::Blocker));
+        assert!(!f.iter().any(|x| x.severity == Severity::Warning));
         let w = f
             .iter()
             .find(|x| x.message.contains("SSH profiles unavailable"))
             .unwrap();
-        assert_eq!(w.severity, Severity::Warning);
+        assert_eq!(w.severity, Severity::Info);
         assert!(w.message.contains("OpenSSH 8.4 or newer required"));
         assert_eq!(w.fix.as_deref(), Some("sudo pacman -S --needed openssh badvpn"));
         let ok = report_with_ssh_missing(PackageManager::Pacman, vec![]);
@@ -737,5 +746,42 @@ mod tests {
             compute_ssh_missing(|e| e == "badvpn-tun2socks", None),
             vec![Dependency::OpenSsh]
         );
+    }
+
+    #[test]
+    fn probe_ssh_check_is_presence_only() {
+        // The pure function `probe` uses: it gets only an existence check, so
+        // it cannot run anything. Version unknown is not "missing".
+        let seen = std::cell::RefCell::new(Vec::new());
+        let all = |e: &str| {
+            seen.borrow_mut().push(e.to_string());
+            true
+        };
+        assert!(compute_ssh_missing_unversioned(all).is_empty());
+        assert_eq!(*seen.borrow(), ["ssh", "ssh-keyscan", "badvpn-tun2socks"]);
+        assert_eq!(
+            compute_ssh_missing_unversioned(|e| e == "ssh"),
+            vec![Dependency::OpenSsh, Dependency::Tun2Socks]
+        );
+        assert_eq!(
+            compute_ssh_missing_unversioned(|e| e != "badvpn-tun2socks"),
+            vec![Dependency::Tun2Socks]
+        );
+    }
+
+    #[test]
+    fn daemon_overrides_ssh_result() {
+        let mut r = report_with_ssh_missing(PackageManager::Apt, vec![]);
+        r.findings = analyse(&r);
+        assert!(r.ssh_ready);
+        // e.g. `ssh -V` as alizy-ssh says 8.2: too old.
+        r.set_ssh_missing(vec![Dependency::OpenSsh]);
+        assert!(!r.ssh_ready);
+        assert_eq!(r.ssh_missing, vec![Dependency::OpenSsh]);
+        let f = r.findings.iter().find(|x| x.message.contains("SSH profiles")).unwrap();
+        assert_eq!(f.severity, Severity::Info);
+        assert_eq!(f.fix.as_deref(), Some("sudo apt install openssh-client"));
+        r.set_ssh_missing(vec![]);
+        assert!(r.ssh_ready && !r.findings.iter().any(|x| x.message.contains("SSH profiles")));
     }
 }

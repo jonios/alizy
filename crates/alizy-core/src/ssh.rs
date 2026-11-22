@@ -110,7 +110,17 @@ impl fmt::Debug for SshConfig {
     }
 }
 
+/// Shown when the host is an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`).
+pub const MAPPED_HOST_ERROR: &str = "Use the IPv4 address instead of an IPv4-mapped IPv6 address";
+
 pub fn validate_public(p: &SshPublic) -> Result<(), String> {
+    // ssh would connect over IPv4 while the firewall exception is rendered for
+    // IPv6, and a mapped loopback would slip past the checks below.
+    if let IpAddr::V6(v6) = p.host {
+        if v6.to_ipv4_mapped().is_some() {
+            return Err(MAPPED_HOST_ERROR.into());
+        }
+    }
     if p.host.is_unspecified() || p.host.is_multicast() || p.host.is_loopback() {
         return Err("host must be a routable IP address".into());
     }
@@ -298,5 +308,25 @@ mod tests {
         assert_eq!(p.dns_servers(), DEFAULT_SSH_DNS.to_vec());
         p.dns = vec!["8.8.8.8".parse().unwrap()];
         assert_eq!(p.dns_servers(), vec!["8.8.8.8".parse::<IpAddr>().unwrap()]);
+    }
+
+    #[test]
+    fn validate_rejects_ipv4_mapped_host() {
+        for h in ["::ffff:192.0.2.10", "::ffff:127.0.0.1"] {
+            let e = validate(&cfg(h, 22, "alice", "pw")).unwrap_err();
+            assert_eq!(e, MAPPED_HOST_ERROR, "{h}");
+        }
+        // Real IPv6 hosts are still fine.
+        assert!(validate(&cfg("2001:db8::10", 22, "alice", "pw")).is_ok());
+    }
+
+    #[test]
+    fn fingerprint_golden() {
+        // Persisted (profile identity in the store, known_hosts and askpass names):
+        // must never change. Independently computed: first 16 bytes of SHA-256 over the NUL-separated fields.
+        let p = cfg("192.0.2.10", 2222, "alice", "pw").public;
+        assert_eq!(fingerprint(&p), "23f510d4d369452eb253ce84ab7edc0c");
+        let p6 = cfg("2001:db8::10", 22, "bob", "pw").public;
+        assert_eq!(fingerprint(&p6), "d4cba5fe2ebdb16b38a027108259e792");
     }
 }
