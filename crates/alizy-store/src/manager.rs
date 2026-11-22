@@ -702,7 +702,22 @@ pub fn try_redacted_text(row: &ProfileRow) -> Result<Zeroizing<String>, ManagerE
 }
 
 /// wg-quick text from the public projection, secrets shown as `<redacted>`.
+///
+/// SSH rows have no wg-quick text: they get a short comment-only description
+/// (`# SSH profile` / `# user@host:port`) with no secrets. Use
+/// [`try_redacted_text`] to get an error for SSH rows instead.
 pub fn redacted_text(row: &ProfileRow) -> Zeroizing<String> {
+    if row.kind == ProfileKind::Ssh {
+        let mut s = Zeroizing::new(String::from("# SSH profile\n"));
+        if let Some(p) = &row.ssh {
+            let host = match p.host {
+                std::net::IpAddr::V6(h) => format!("[{h}]"),
+                h => h.to_string(),
+            };
+            s.push_str(&format!("# {}@{host}:{}\n", p.username, p.port));
+        }
+        return s;
+    }
     let mut s = Zeroizing::new(String::from("[Interface]\nPrivateKey = <redacted>\n"));
     let c = &row.config;
     let join = |v: Vec<String>| v.join(", ");

@@ -362,3 +362,41 @@ async fn existing_wireguard_rows_get_kind_wireguard_after_migration() {
     let back: alizy_store::ProfileRow = serde_json::from_value(v).unwrap();
     assert_eq!(back.kind, ProfileKind::Wireguard);
 }
+
+#[tokio::test]
+async fn redacted_text_for_ssh_row_is_not_wireguard() {
+    let (_d, m) = setup().await;
+    let v4 = m
+        .create_ssh("S4", public("203.0.113.10", 2222, "alice"), pw(PW))
+        .await
+        .unwrap();
+    let t = alizy_store::manager::redacted_text(&v4);
+    assert_eq!(t.as_str(), "# SSH profile\n# alice@203.0.113.10:2222\n");
+    let v6 = m
+        .create_ssh("S6", public("2001:db8::1", 22, "bob"), pw(PW))
+        .await
+        .unwrap();
+    let t = alizy_store::manager::redacted_text(&v6);
+    assert_eq!(t.as_str(), "# SSH profile\n# bob@[2001:db8::1]:22\n");
+    assert!(!t.contains("[Interface]") && !t.contains(PW));
+}
+
+#[tokio::test]
+async fn delete_attempts_ssh_slot_even_if_wg_slot_fails() {
+    let (dir, m) = setup().await;
+    let row = m
+        .create_ssh("S", public("203.0.113.10", 22, "alice"), pw(PW))
+        .await
+        .unwrap();
+    // Make the WG slot undeletable: a non-empty directory where the file would be.
+    let wg_slot = dir.path().join("secrets").join(format!("{}.json", row.id));
+    std::fs::create_dir_all(wg_slot.join("blocker")).unwrap();
+    assert!(m.secrets.delete(&row.id).is_err(), "WG slot failure must be reported");
+    assert!(
+        matches!(
+            m.secrets.get_ssh_password(&row.id),
+            Err(alizy_store::secrets::SecretError::Missing)
+        ),
+        "the SSH password must still be removed"
+    );
+}

@@ -192,9 +192,11 @@ impl SecretStore {
     }
 
     /// Remove every secret of a profile: WireGuard keys and SSH password.
+    /// Both slots are always attempted; the first error is returned.
     pub fn delete(&self, id: &str) -> Result<(), SecretError> {
-        self.delete_slot(id)?;
-        self.delete_slot(&ssh_id(id))
+        let wg = self.delete_slot(id);
+        let ssh = self.delete_slot(&ssh_id(id));
+        wg.and(ssh)
     }
 
     fn delete_slot(&self, slot: &str) -> Result<(), SecretError> {
