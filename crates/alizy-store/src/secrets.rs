@@ -1,4 +1,7 @@
-//! Secret storage for private keys and pre-shared keys.
+//! Secret storage for private keys, pre-shared keys and SSH passwords.
+//!
+//! SSH passwords are stored under the id `"ssh:" + profile id` in the same
+//! backend as WireGuard secrets.
 //!
 //! Primary backend: the OS credential store (Secret Service on Linux via
 //! libsecret/KWallet/GNOME Keyring, through the `keyring` crate). Fallback,
@@ -46,6 +49,10 @@ pub struct SecretStore {
 
 fn user(id: &str) -> String {
     format!("profile:{id}")
+}
+
+fn ssh_id(id: &str) -> String {
+    format!("ssh:{id}")
 }
 
 fn store_err(e: impl std::fmt::Display) -> SecretError {
@@ -184,13 +191,61 @@ impl SecretStore {
         }
     }
 
+    /// Remove every secret of a profile: WireGuard keys and SSH password.
     pub fn delete(&self, id: &str) -> Result<(), SecretError> {
+        self.delete_slot(id)?;
+        self.delete_slot(&ssh_id(id))
+    }
+
+    fn delete_slot(&self, slot: &str) -> Result<(), SecretError> {
         if let Backend::Keyring = &self.backend {
-            match keyring::Entry::new(SERVICE, &user(id)).and_then(|e| e.delete_credential()) {
+            match keyring::Entry::new(SERVICE, &user(slot)).and_then(|e| e.delete_credential()) {
                 Ok(()) | Err(keyring::Error::NoEntry) => {}
                 Err(e) => return Err(SecretError::Store(explain(&e))),
             }
         }
-        file_delete(&self.file_dir, id)
+        file_delete(&self.file_dir, slot)
+    }
+
+    /// Store an SSH profile's password (as a JSON string) under `"ssh:" + id`.
+    pub fn put_ssh_password(&self, id: &str, pw: &str) -> Result<(), SecretError> {
+        let slot = ssh_id(id);
+        let json = Zeroizing::new(serde_json::to_string(pw).map_err(store_err)?);
+        match &self.backend {
+            Backend::Keyring => {
+                keyring::Entry::new(SERVICE, &user(&slot))
+                    .and_then(|e| e.set_password(&json))
+                    .map_err(|e| SecretError::Store(explain(&e)))?;
+                file_delete(&self.file_dir, &slot)
+            }
+            Backend::File(dir) => file_put(dir, &slot, &json),
+        }
+    }
+
+    /// The SSH password of profile `id`; `SecretError::Missing` when none is stored.
+    pub fn get_ssh_password(&self, id: &str) -> Result<Zeroizing<String>, SecretError> {
+        let slot = ssh_id(id);
+        let decode = |json: &str| -> Result<Zeroizing<String>, SecretError> {
+            serde_json::from_str::<String>(json)
+                .map(Zeroizing::new)
+                .map_err(|e| SecretError::Store(format!("corrupt secret: {e}")))
+        };
+        match &self.backend {
+            Backend::Keyring => match keyring::Entry::new(SERVICE, &user(&slot)).and_then(|e| e.get_password()) {
+                Ok(s) => decode(&Zeroizing::new(s)),
+                Err(keyring::Error::NoEntry) => {
+                    let pw = decode(&file_get(&self.file_dir, &slot)?)?;
+                    match self.put_ssh_password(id, &pw) {
+                        Ok(()) => {
+                            tracing::info!("migrated SSH password for profile {id} from file storage to the keyring")
+                        }
+                        Err(e) => tracing::warn!("could not migrate SSH password for profile {id} to the keyring: {e}"),
+                    }
+                    Ok(pw)
+                }
+                Err(e) => Err(SecretError::Store(explain(&e))),
+            },
+            Backend::File(dir) => decode(&file_get(dir, &slot)?),
+        }
     }
 }

@@ -1,6 +1,7 @@
 //! SQLite access (SQLx, runtime queries, embedded migrations).
 
 use alizy_core::config::PublicConfig;
+use alizy_core::ssh::SshPublic;
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
@@ -30,6 +31,32 @@ pub fn now() -> i64 {
         .unwrap_or(0)
 }
 
+/// What a profile tunnels through.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileKind {
+    #[default]
+    Wireguard,
+    Ssh,
+}
+
+impl ProfileKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProfileKind::Wireguard => "wireguard",
+            ProfileKind::Ssh => "ssh",
+        }
+    }
+
+    fn parse(s: &str) -> Result<Self, DbError> {
+        match s {
+            "wireguard" => Ok(ProfileKind::Wireguard),
+            "ssh" => Ok(ProfileKind::Ssh),
+            other => Err(DbError::Data(format!("unknown profile kind {other:?}"))),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfileRow {
     pub id: String,
@@ -42,6 +69,16 @@ pub struct ProfileRow {
     pub created_at: i64,
     pub updated_at: i64,
     pub last_connected_at: Option<i64>,
+    /// WireGuard rows hold their real config in `config`; SSH rows hold a
+    /// placeholder there and their endpoint in `ssh`.
+    #[serde(default)]
+    pub kind: ProfileKind,
+    /// Non-secret SSH fields (never the password). `Some` iff `kind == Ssh`.
+    #[serde(default)]
+    pub ssh: Option<SshPublic>,
+    /// SSH only: no usable password is stored (e.g. restored from a backup).
+    #[serde(default)]
+    pub password_needed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,11 +117,13 @@ pub struct Db {
 }
 
 const PROFILE_COLS: &str =
-    "id, name, category, favorite, fingerprint, public_config, cached_endpoints, created_at, updated_at, last_connected_at";
+    "id, name, category, favorite, fingerprint, public_config, cached_endpoints, created_at, updated_at, last_connected_at, kind, ssh_public, password_needed";
 
 fn row_to_profile(r: &sqlx::sqlite::SqliteRow) -> Result<ProfileRow, DbError> {
     let cfg: String = r.get("public_config");
     let eps: String = r.get("cached_endpoints");
+    let kind: String = r.get("kind");
+    let ssh: Option<String> = r.get("ssh_public");
     Ok(ProfileRow {
         id: r.get("id"),
         name: r.get("name"),
@@ -96,7 +135,16 @@ fn row_to_profile(r: &sqlx::sqlite::SqliteRow) -> Result<ProfileRow, DbError> {
         created_at: r.get("created_at"),
         updated_at: r.get("updated_at"),
         last_connected_at: r.get("last_connected_at"),
+        kind: ProfileKind::parse(&kind)?,
+        ssh: ssh
+            .map(|s| serde_json::from_str(&s).map_err(|e| DbError::Data(e.to_string())))
+            .transpose()?,
+        password_needed: r.get::<i64, _>("password_needed") != 0,
     })
+}
+
+fn ssh_json(p: &SshPublic) -> Result<String, DbError> {
+    serde_json::to_string(p).map_err(|e| DbError::Data(e.to_string()))
 }
 
 impl Db {
@@ -127,7 +175,7 @@ impl Db {
     // ── profiles ──
     pub async fn insert_profile(&self, p: &ProfileRow) -> Result<(), DbError> {
         sqlx::query(&format!(
-            "INSERT INTO profiles ({PROFILE_COLS}) VALUES (?,?,?,?,?,?,?,?,?,?)"
+            "INSERT INTO profiles ({PROFILE_COLS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"
         ))
         .bind(&p.id)
         .bind(&p.name)
@@ -139,6 +187,9 @@ impl Db {
         .bind(p.created_at)
         .bind(p.updated_at)
         .bind(p.last_connected_at)
+        .bind(p.kind.as_str())
+        .bind(p.ssh.as_ref().map(ssh_json).transpose()?)
+        .bind(p.password_needed as i64)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -229,6 +280,42 @@ impl Db {
             sqlx::query("UPDATE profiles SET public_config = ?, fingerprint = ?, cached_endpoints = '[]', updated_at = ? WHERE id = ?")
                 .bind(json)
                 .bind(fingerprint)
+                .bind(t)
+                .bind(id),
+        )
+        .await
+    }
+
+    /// Replace an SSH row's name, endpoint and identity fingerprint.
+    pub async fn update_ssh_profile(
+        &self,
+        id: &str,
+        name: &str,
+        public: &SshPublic,
+        fingerprint: &str,
+        password_needed: bool,
+    ) -> Result<(), DbError> {
+        let t = now();
+        self.exec(
+            sqlx::query(
+                "UPDATE profiles SET name = ?, ssh_public = ?, fingerprint = ?, password_needed = ?, cached_endpoints = '[]', updated_at = ? WHERE id = ? AND kind = 'ssh'",
+            )
+            .bind(name)
+            .bind(ssh_json(public)?)
+            .bind(fingerprint)
+            .bind(password_needed as i64)
+            .bind(t)
+            .bind(id),
+        )
+        .await
+    }
+
+    /// Replace an SSH row's public fields only (e.g. pinning a host key).
+    pub async fn set_ssh_public(&self, id: &str, public: &SshPublic) -> Result<(), DbError> {
+        let t = now();
+        self.exec(
+            sqlx::query("UPDATE profiles SET ssh_public = ?, updated_at = ? WHERE id = ? AND kind = 'ssh'")
+                .bind(ssh_json(public)?)
                 .bind(t)
                 .bind(id),
         )
