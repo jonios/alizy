@@ -20,6 +20,8 @@ mod persist;
 mod resolver;
 #[cfg(target_os = "linux")]
 mod server;
+#[cfg(target_os = "linux")]
+mod socks_dns;
 
 #[cfg(not(target_os = "linux"))]
 fn main() {
