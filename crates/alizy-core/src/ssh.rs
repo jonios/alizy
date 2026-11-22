@@ -16,6 +16,20 @@ pub const DEFAULT_SSH_DNS: [IpAddr; 2] = [
     IpAddr::V4(std::net::Ipv4Addr::new(9, 9, 9, 9)),
 ];
 
+/// Returned by `HostKey::fingerprint_sha256` for undecodable key data; never
+/// a valid fingerprint, so it cannot be mistaken for one.
+pub const INVALID_FINGERPRINT: &str = "SHA256:invalid";
+
+const ALLOWED_KEY_TYPES: [&str; 7] = [
+    "ssh-ed25519",
+    "ssh-rsa",
+    "ecdsa-sha2-nistp256",
+    "ecdsa-sha2-nistp384",
+    "ecdsa-sha2-nistp521",
+    "sk-ssh-ed25519@openssh.com",
+    "sk-ecdsa-sha2-nistp256@openssh.com",
+];
+
 /// A pinned SSH server host key (as in a known_hosts entry).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostKey {
@@ -24,9 +38,25 @@ pub struct HostKey {
 }
 
 impl HostKey {
+    /// Check that the key is safe to interpolate into a known_hosts line.
+    pub fn validate(&self) -> Result<(), String> {
+        if !ALLOWED_KEY_TYPES.contains(&self.key_type.as_str()) {
+            return Err("unsupported host key type".into());
+        }
+        if self.key_b64.is_empty() || self.key_b64.len() > 8192 {
+            return Err("host key must be 1-8192 characters".into());
+        }
+        if B64.decode(&self.key_b64).is_err() {
+            return Err("host key is not valid base64".into());
+        }
+        Ok(())
+    }
+
     /// OpenSSH-style fingerprint: `SHA256:<base64 without padding>`.
     pub fn fingerprint_sha256(&self) -> String {
-        let raw = B64.decode(&self.key_b64).unwrap_or_default();
+        let Ok(raw) = B64.decode(&self.key_b64) else {
+            return INVALID_FINGERPRINT.to_string();
+        };
         let digest = Sha256::digest(&raw);
         format!("SHA256:{}", B64_NOPAD.encode(digest))
     }
@@ -86,6 +116,9 @@ pub fn validate_public(p: &SshPublic) -> Result<(), String> {
     }
     if p.port == 0 {
         return Err("port must be 1-65535".into());
+    }
+    if let Some(k) = &p.host_key {
+        k.validate()?;
     }
     let u = &p.username;
     if u.is_empty() || u.chars().count() > 64 {
@@ -219,6 +252,44 @@ mod tests {
             k.fingerprint_sha256(),
             "SHA256:O8fctiFq1xVT6FOLWYX8ZuvndZbyHpgUl6l8Ez7SXSc"
         );
+    }
+
+    fn good_key() -> HostKey {
+        HostKey {
+            key_type: "ssh-ed25519".into(),
+            key_b64: "AAAAC3NzaC1lZDI1NTE5AAAAICJ9AyQ1/Hf8ky/h28JhISjg1GkKGhTejR6j6uTwPF1l".into(),
+        }
+    }
+
+    #[test]
+    fn host_key_validation() {
+        assert!(good_key().validate().is_ok());
+        let mut k = good_key();
+        k.key_b64 = "AAAA\nssh-rsa BBBB".into();
+        assert!(k.validate().is_err());
+        k.key_b64 = "not base64!!".into();
+        assert!(k.validate().is_err());
+        assert_eq!(k.fingerprint_sha256(), INVALID_FINGERPRINT);
+        k.key_b64 = String::new();
+        assert!(k.validate().is_err());
+        k.key_b64 = "A".repeat(8196);
+        assert!(k.validate().is_err());
+        let mut k = good_key();
+        k.key_type = "ssh-dss".into();
+        assert!(k.validate().is_err());
+        k.key_type = "ssh-ed25519 evil".into();
+        assert!(k.validate().is_err());
+    }
+
+    #[test]
+    fn validate_public_rejects_bad_host_key() {
+        let mut c = cfg("192.0.2.10", 22, "alice", "pw");
+        c.public.host_key = Some(good_key());
+        assert!(validate(&c).is_ok());
+        let mut bad = good_key();
+        bad.key_b64 = "AAAA\nevil".into();
+        c.public.host_key = Some(bad);
+        assert!(validate(&c).is_err());
     }
 
     #[test]
