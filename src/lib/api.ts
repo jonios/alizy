@@ -1,5 +1,5 @@
 // Typed wrappers around the allow-listed Tauri commands (src-tauri/src/commands).
-// Every command returns a Promise and rejects with a human-readable string.
+// Every command returns a Promise and rejects with a human-readable string (except `connect`, which rejects with a ConnectError object).
 
 import { invoke } from "@tauri-apps/api/core";
 import type {
@@ -11,6 +11,7 @@ import type {
   LogEntry,
   LogQuery,
   NetworkPolicy,
+  HostKey,
   ProfileDetail,
   ProfileSummary,
   RouteTest,
@@ -39,6 +40,13 @@ export const api = {
   setFavorite: (id: string, favorite: boolean) => invoke<void>("profile_set_favorite", { id, favorite }),
   /** text may keep "PrivateKey = <redacted>" to retain the stored key */
   updateText: (id: string, text: string) => invoke<string[]>("profile_update_text", { id, text }),
+  createSsh: (name: string, host: string, port: number, username: string, password: string) =>
+    invoke<ProfileSummary>("profile_create_ssh", { name, host, port, username, password }),
+  /** password: null or "" keeps the stored password. */
+  updateSsh: (id: string, name: string, host: string, port: number, username: string, password: string | null) =>
+    invoke<ProfileSummary>("profile_update_ssh", { id, name, host, port, username, password }),
+  trustHostKey: (id: string, key: HostKey) => invoke<void>("profile_trust_host_key", { id, key }),
+  clearHostKey: (id: string) => invoke<void>("profile_clear_host_key", { id }),
   duplicate: (id: string) => invoke<ProfileSummary>("profile_duplicate", { id }),
   remove: (id: string) => invoke<void>("profile_delete", { id }),
   exportProfile: (id: string, path: string, includePrivate: boolean) =>
@@ -48,6 +56,7 @@ export const api = {
   backupImport: (path: string) => invoke<ImportReport>("backup_import", { path }),
 
   // connection
+  /** Rejects with a `ConnectError` (see types.ts), a plain object, not a string. */
   connect: (id: string) => invoke<void>("connect", { id }),
   disconnect: () => invoke<void>("disconnect"),
   policyGet: () => invoke<NetworkPolicy>("policy_get"),
