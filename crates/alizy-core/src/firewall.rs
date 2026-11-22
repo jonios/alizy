@@ -261,11 +261,37 @@ impl FirewallPlan {
         let Some(uid) = t.ssh_uid else { return };
         s.push_str("  chain ssh_mark {\n");
         s.push_str("    type route hook output priority mangle - 1; policy accept;\n");
+        // Socket-less packets of the connection (timewait ACK/RST) have no
+        // skuid: take the mark from conntrack.
+        let _ = writeln!(s, "    ct mark {FWMARK:#x} meta mark set ct mark");
         for ep in &t.tcp_endpoints {
             let fam = if ep.is_ipv4() { "ip" } else { "ip6" };
             let _ = writeln!(
                 s,
-                "    meta skuid {uid} {fam} daddr {} tcp dport {} meta mark set {FWMARK:#x}",
+                "    meta skuid {uid} {fam} daddr {} tcp dport {} meta mark set {FWMARK:#x} ct mark set {FWMARK:#x}",
+                ep.ip(),
+                ep.port()
+            );
+        }
+        s.push_str("  }\n");
+        // Replies from the server get the mark back before routing, so strict
+        // reverse-path filtering (src_valid_mark) looks them up outside the tunnel.
+        s.push_str("  chain ssh_pre {\n");
+        s.push_str("    type filter hook prerouting priority mangle; policy accept;\n");
+        let _ = writeln!(s, "    ct mark {FWMARK:#x} meta mark set ct mark");
+        s.push_str("  }\n");
+        // connect() chose the source address from the unmarked lookup (the
+        // tunnel), and the re-route after marking keeps it: rewrite it to the
+        // outgoing interface's address. Narrowed to the server tuples, which
+        // only ssh_mark (alizy-ssh's sockets) marks.
+        s.push_str("  chain ssh_nat {\n");
+        s.push_str("    type nat hook postrouting priority srcnat; policy accept;\n");
+        for ep in &t.tcp_endpoints {
+            let fam = if ep.is_ipv4() { "ip" } else { "ip6" };
+            let _ = writeln!(
+                s,
+                "    meta mark {FWMARK:#x} oifname != \"{}\" {fam} daddr {} tcp dport {} masquerade",
+                t.iface,
                 ep.ip(),
                 ep.port()
             );
@@ -351,11 +377,16 @@ impl FirewallPlan {
     }
 
     fn render_forward(&self, s: &mut String) {
-        if !self.kill_switch && self.ipv4_enabled && self.ipv6_enabled {
+        let block_udp = self.tunnel.as_ref().filter(|t| t.block_udp);
+        if !self.kill_switch && self.ipv4_enabled && self.ipv6_enabled && block_udp.is_none() {
             return;
         }
         s.push_str("  chain forward {\n");
         s.push_str("    type filter hook forward priority filter - 10; policy accept;\n");
+        if let Some(t) = block_udp {
+            // Forwarded traffic (containers, VMs) cannot use UDP through the SSH tunnel either.
+            let _ = writeln!(s, "    oifname \"{}\" meta l4proto udp reject", t.iface);
+        }
         if !self.ipv4_enabled {
             s.push_str("    meta nfproto ipv4 counter drop comment \"ipv4-disabled\"\n");
         }
@@ -660,11 +691,11 @@ mod tests {
         );
         let m4 = pos(
             &r,
-            "    meta skuid 967 ip daddr 203.0.113.5 tcp dport 22 meta mark set 0x4a5a\n",
+            "    meta skuid 967 ip daddr 203.0.113.5 tcp dport 22 meta mark set 0x4a5a ct mark set 0x4a5a\n",
         );
         let m6 = pos(
             &r,
-            "    meta skuid 967 ip6 daddr 2001:db8::5 tcp dport 443 meta mark set 0x4a5a\n",
+            "    meta skuid 967 ip6 daddr 2001:db8::5 tcp dport 443 meta mark set 0x4a5a ct mark set 0x4a5a\n",
         );
         assert!(chain < m4 && m4 < m6 && m6 < pos(&r, "  chain output {"));
         // WireGuard plans have no ssh_mark chain.
@@ -721,5 +752,70 @@ mod tests {
         assert!(!FirewallPlan::new(&policy(true), tunnel())
             .render()
             .contains("l4proto udp"));
+    }
+
+    /// connect() picks its source address from the unmarked lookup (the
+    /// tunnel table), so ssh's marked packets leave the physical NIC with the
+    /// tunnel address unless they are masqueraded.
+    #[test]
+    fn ssh_plan_masquerades_marked_ssh_traffic() {
+        for ks in [true, false] {
+            let r = FirewallPlan::new(&policy(ks), ssh_tunnel()).render();
+            let chain = pos(
+                &r,
+                "  chain ssh_nat {\n    type nat hook postrouting priority srcnat; policy accept;\n",
+            );
+            let n4 = pos(
+                &r,
+                "    meta mark 0x4a5a oifname != \"alizy0\" ip daddr 203.0.113.5 tcp dport 22 masquerade\n",
+            );
+            let n6 = pos(
+                &r,
+                "    meta mark 0x4a5a oifname != \"alizy0\" ip6 daddr 2001:db8::5 tcp dport 443 masquerade\n",
+            );
+            assert!(chain < n4 && n4 < n6);
+        }
+        let wg = FirewallPlan::new(&policy(true), tunnel()).render();
+        assert!(!wg.contains("ssh_nat") && !wg.contains("masquerade"));
+    }
+
+    /// Replies from the SSH server must carry the mark for strict rp_filter
+    /// (src_valid_mark), and socket-less locally generated packets (timewait
+    /// ACK/RST) must get it back from conntrack.
+    #[test]
+    fn ssh_plan_restores_conntrack_mark() {
+        let r = FirewallPlan::new(&policy(false), ssh_tunnel()).render();
+        let mark = pos(&r, "  chain ssh_mark {");
+        let restore_out = pos(&r, "    ct mark 0x4a5a meta mark set ct mark\n");
+        let set = pos(&r, "meta mark set 0x4a5a ct mark set 0x4a5a\n");
+        assert!(mark < restore_out && restore_out < set);
+        let pre = pos(
+            &r,
+            "  chain ssh_pre {\n    type filter hook prerouting priority mangle; policy accept;\n    ct mark 0x4a5a meta mark set ct mark\n  }\n",
+        );
+        assert!(set < pre);
+        let wg = FirewallPlan::new(&policy(true), tunnel()).render();
+        assert!(!wg.contains("ssh_pre") && !wg.contains("ct mark"));
+    }
+
+    #[test]
+    fn ssh_plan_rejects_forwarded_udp_on_tunnel() {
+        for ks in [true, false] {
+            let r = FirewallPlan::new(&policy(ks), ssh_tunnel()).render();
+            let fwd = pos(
+                &r,
+                "  chain forward {\n    type filter hook forward priority filter - 10; policy accept;\n",
+            );
+            let udp = r[fwd..]
+                .find("    oifname \"alizy0\" meta l4proto udp reject\n")
+                .unwrap_or_else(|| panic!("no forward udp reject\n{r}"));
+            if let Some(acc) = r[fwd..].find("    oifname \"alizy0\" accept\n") {
+                assert!(udp < acc);
+            }
+            assert_eq!(r.matches("oifname \"alizy0\" meta l4proto udp reject").count(), 2);
+        }
+        assert!(!FirewallPlan::new(&NetworkPolicy::default(), tunnel())
+            .render()
+            .contains("chain forward"));
     }
 }
