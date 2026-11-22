@@ -17,7 +17,7 @@ Version: $VER
 Architecture: $ARCH
 Maintainer: Alizy developers <noreply@alizy.invalid>
 Depends: wireguard-tools, nftables, iproute2, polkitd | policykit-1, systemd
-Recommends: resolvconf | openresolv
+Recommends: resolvconf | openresolv, openssh-client, badvpn
 Section: net
 Priority: optional
 Description: Alizy VPN service (WireGuard, nftables kill switch, split tunnelling)

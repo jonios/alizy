@@ -18,5 +18,5 @@ rm -f "$PREFIX/bin/alizyd" "$PREFIX/bin/alizy" \
   /usr/share/icons/hicolor/128x128/apps/io.alizy.app.png
 systemctl daemon-reload
 [[ "${1:-}" == "--purge" ]] && rm -rf /var/lib/alizy
-echo "Alizy removed. The 'alizy' group was kept (remove with: groupdel alizy)."
+echo "Alizy removed. The 'alizy' group and 'alizy-ssh' user were kept (remove with: groupdel alizy; userdel alizy-ssh)."
 echo "Per-user data remains in ~/.local/share/io.alizy.app and the keyring entries 'io.alizy.app'."

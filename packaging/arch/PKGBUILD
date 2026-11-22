@@ -33,7 +33,9 @@ check() {
 package_alizyd() {
   pkgdesc="Alizy privileged service: WireGuard tunnels, nftables kill switch, DNS and split tunnelling"
   depends=('wireguard-tools' 'nftables' 'iproute2' 'polkit' 'systemd')
-  optdepends=('openresolv: DNS management on systems without systemd-resolved')
+  optdepends=('openresolv: DNS management on systems without systemd-resolved'
+              'openssh: SSH profiles'
+              'badvpn: SSH profiles (tun2socks)')
   install=alizyd.install
   local s; s="$(_src)"
   install -Dm755 "$srcdir/target/release/alizyd" "$pkgdir/usr/bin/alizyd"

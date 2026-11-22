@@ -24,7 +24,15 @@ StateDirectory=alizy
 StateDirectoryMode=0700
 # Hardening. The service needs CAP_NET_ADMIN (links, routes, nftables) and
 # write access to /etc/resolv.conf only on systems without systemd-resolved.
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_CHOWN
+# SSH profiles additionally need: CAP_SETUID/CAP_SETGID (spawn ssh and
+# badvpn-tun2socks as the alizy-ssh user, drop supplementary groups),
+# CAP_KILL (signal those alizy-ssh children on stop; without it ssh is
+# orphaned), CAP_NET_BIND_SERVICE (DNS forwarder on 127.77.0.1:53) and
+# CAP_CHOWN (hand known_hosts/askpass files to alizy-ssh). The children lose
+# all capabilities on setuid. /run/alizy/ssh (0750 root:alizy-ssh) is created
+# by the daemon itself, not tmpfiles.d: RuntimeDirectory=alizy is wiped on
+# every stop, so a tmpfiles entry beneath it would not survive.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_CHOWN CAP_SETUID CAP_SETGID CAP_KILL CAP_NET_BIND_SERVICE
 # The daemon holds private keys in memory while connected: no core dumps.
 LimitCORE=0
 LimitNOFILE=4096
