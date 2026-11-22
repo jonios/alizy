@@ -10,11 +10,13 @@ pub mod platform;
 pub mod profile;
 pub mod routing;
 pub mod split;
+pub mod ssh;
 pub mod state;
 pub mod sysprobe;
 
 pub use config::{parse, ConfigError, ParseOutcome, PublicConfig, WgConfig};
 pub use firewall::{FirewallPlan, NetworkPolicy};
+pub use ssh::{HostKey, SshConfig, SshPublic};
 pub use state::ConnectionState;
 
 /// Replace anything that looks like a base64 WireGuard key with `[redacted]`.
