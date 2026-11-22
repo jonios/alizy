@@ -70,6 +70,8 @@ pub enum Dependency {
     Resolvconf,
     Webkit,
     AppIndicator,
+    OpenSsh,
+    Tun2Socks,
 }
 
 impl Dependency {
@@ -82,6 +84,8 @@ impl Dependency {
             Self::Resolvconf => "resolvconf",
             Self::Webkit => "WebKitGTK 4.1 runtime",
             Self::AppIndicator => "Ayatana AppIndicator (system tray)",
+            Self::OpenSsh => "OpenSSH client (ssh ≥ 8.4)",
+            Self::Tun2Socks => "tun2socks (badvpn-tun2socks)",
         }
     }
 }
@@ -130,6 +134,10 @@ impl PackageManager {
             (Apt, AppIndicator) => "libayatana-appindicator3-1",
             (Dnf, AppIndicator) => "libayatana-appindicator-gtk3",
             (Zypper, AppIndicator) => "libayatana-appindicator3-1",
+            (Pacman, OpenSsh) => "openssh",
+            (Apt, OpenSsh) => "openssh-client",
+            (Dnf, OpenSsh) | (Zypper, OpenSsh) => "openssh-clients",
+            (_, Tun2Socks) => "badvpn",
         })
     }
 
@@ -204,6 +212,12 @@ pub struct SystemReport {
     pub dns_backend: DnsBackend,
     pub desktop: Option<String>,
     pub findings: Vec<Finding>,
+    /// True when every optional SSH-tunnel dependency is present and usable.
+    #[serde(default)]
+    pub ssh_ready: bool,
+    /// Missing or too-old optional SSH-tunnel dependencies. Never blocks WireGuard.
+    #[serde(default)]
+    pub ssh_missing: Vec<Dependency>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -246,7 +260,57 @@ pub const OPTIONAL_EXES: &[&str] = &[
     "systemctl",
     "firewall-cmd",
     "ufw",
+    "ssh",
+    "ssh-keyscan",
+    "badvpn-tun2socks",
 ];
+
+/// Parse `ssh -V` output (`OpenSSH_X.Yp...`); true when the version is 8.4 or newer.
+pub fn openssh_version_ok(ssh_v_output: &str) -> bool {
+    let Some(rest) = ssh_v_output.trim_start().strip_prefix("OpenSSH_") else {
+        return false;
+    };
+    let mut parts = rest.splitn(2, '.');
+    let major: u32 = match parts.next().and_then(|m| m.parse().ok()) {
+        Some(m) => m,
+        None => return false,
+    };
+    let minor: u32 = parts
+        .next()
+        .map(|m| m.chars().take_while(|c| c.is_ascii_digit()).collect::<String>())
+        .and_then(|m| m.parse().ok())
+        .unwrap_or(0);
+    (major, minor) >= (8, 4)
+}
+
+/// Pure SSH dependency check. `ssh_v` is the `ssh -V` output when it could be obtained.
+fn compute_ssh_missing(has_exe: impl Fn(&str) -> bool, ssh_v: Option<&str>) -> Vec<Dependency> {
+    let mut missing = Vec::new();
+    let openssh_ok = has_exe("ssh") && has_exe("ssh-keyscan") && ssh_v.map(openssh_version_ok).unwrap_or(false);
+    if !openssh_ok {
+        missing.push(Dependency::OpenSsh);
+    }
+    if !has_exe("badvpn-tun2socks") {
+        missing.push(Dependency::Tun2Socks);
+    }
+    missing
+}
+
+/// `ssh -V` prints to stderr, e.g. `OpenSSH_9.6p1, OpenSSL 3.0.13`.
+fn ssh_version_output(ssh_path: &str) -> Option<String> {
+    let out = std::process::Command::new(ssh_path)
+        .arg("-V")
+        .env_clear()
+        .env("PATH", SAFE_PATH)
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stderr).into_owned();
+    if text.trim().is_empty() {
+        Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        Some(text)
+    }
+}
 
 /// Fixed search path. The daemon never inherits PATH from a caller.
 pub const SAFE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
@@ -350,6 +414,12 @@ pub fn probe() -> SystemReport {
         .map(|p| p.to_string_lossy().into_owned());
     let dns_backend = choose_dns_backend(resolved_active, resolv_conf_target.as_deref(), has("resolvconf"));
     let kw = kernel_wireguard(&kernel);
+    let ssh_v = executables
+        .get("ssh")
+        .cloned()
+        .flatten()
+        .and_then(|p| ssh_version_output(&p));
+    let ssh_missing = compute_ssh_missing(has, ssh_v.as_deref());
     let mut report = SystemReport {
         firewalld_active: systemd && systemctl_active("firewalld.service"),
         ufw_active: ufw_enabled(),
@@ -366,6 +436,8 @@ pub fn probe() -> SystemReport {
         resolv_conf_target,
         dns_backend,
         findings: Vec::new(),
+        ssh_ready: ssh_missing.is_empty(),
+        ssh_missing,
     };
     report.findings = analyse(&report);
     report
@@ -443,6 +515,19 @@ pub fn analyse(r: &SystemReport) -> Vec<Finding> {
                 "No DNS manager detected. Alizy will back up and rewrite /etc/resolv.conf while connected.".into()
             },
             fix: pm.install_command(&[Dependency::Resolvconf]),
+        });
+    }
+    if !r.ssh_missing.is_empty() {
+        let names: Vec<&str> = r.ssh_missing.iter().map(|d| d.label()).collect();
+        let mut message = format!("SSH profiles unavailable: missing {}.", names.join(", "));
+        if r.ssh_missing.contains(&Dependency::OpenSsh) {
+            message.push_str(" OpenSSH 8.4 or newer required.");
+        }
+        message.push_str(" WireGuard profiles are unaffected.");
+        f.push(Finding {
+            severity: Severity::Warning,
+            message,
+            fix: pm.install_command(&r.ssh_missing),
         });
     }
     f
@@ -553,6 +638,8 @@ mod tests {
             dns_backend: DnsBackend::ResolvConfFile,
             desktop: None,
             findings: vec![],
+            ssh_ready: false,
+            ssh_missing: vec![],
         };
         let f = analyse(&r);
         let blocker = f.iter().find(|x| x.severity == Severity::Blocker).unwrap();
@@ -560,5 +647,95 @@ mod tests {
         assert_eq!(blocker.fix.as_deref(), Some("sudo apt install wireguard-tools"));
         assert!(f.iter().any(|x| x.message.contains("ufw")));
         assert!(f.iter().any(|x| x.message.contains("NetworkManager")));
+    }
+
+    fn report_with_ssh_missing(pm: PackageManager, ssh_missing: Vec<Dependency>) -> SystemReport {
+        let mut exes = BTreeMap::new();
+        for (e, _) in REQUIRED_EXES {
+            exes.insert(e.to_string(), Some(format!("/usr/bin/{e}")));
+        }
+        SystemReport {
+            os: os("arch", ""),
+            kernel: "6.1.0".into(),
+            package_manager: pm,
+            kernel_wireguard: KernelWireguard::Loaded,
+            executables: exes,
+            systemd: true,
+            firewalld_active: false,
+            ufw_active: false,
+            iptables: IptablesFlavor::Nft,
+            network_manager_active: false,
+            resolved_active: true,
+            resolv_conf_target: Some("/run/systemd/resolve/stub-resolv.conf".into()),
+            dns_backend: DnsBackend::SystemdResolved,
+            desktop: None,
+            findings: vec![],
+            ssh_ready: ssh_missing.is_empty(),
+            ssh_missing,
+        }
+    }
+
+    #[test]
+    fn ssh_missing_is_warning_not_blocker() {
+        let r = report_with_ssh_missing(PackageManager::Pacman, vec![Dependency::OpenSsh, Dependency::Tun2Socks]);
+        let f = analyse(&r);
+        assert!(!f.iter().any(|x| x.severity == Severity::Blocker));
+        let w = f
+            .iter()
+            .find(|x| x.message.contains("SSH profiles unavailable"))
+            .unwrap();
+        assert_eq!(w.severity, Severity::Warning);
+        assert!(w.message.contains("OpenSSH 8.4 or newer required"));
+        assert_eq!(w.fix.as_deref(), Some("sudo pacman -S --needed openssh badvpn"));
+        let ok = report_with_ssh_missing(PackageManager::Pacman, vec![]);
+        assert!(!analyse(&ok).iter().any(|x| x.message.contains("SSH profiles")));
+    }
+
+    #[test]
+    fn openssh_version_parse() {
+        assert!(openssh_version_ok("OpenSSH_10.6p2, OpenSSL 3.0"));
+        assert!(openssh_version_ok("OpenSSH_8.4p1"));
+        assert!(openssh_version_ok("OpenSSH_9.0p1 Debian"));
+        assert!(!openssh_version_ok("OpenSSH_8.3p1"));
+        assert!(!openssh_version_ok("OpenSSH_7.9p1"));
+        assert!(!openssh_version_ok("garbage"));
+        assert!(!openssh_version_ok(""));
+    }
+
+    #[test]
+    fn ssh_dependency_packages() {
+        use Dependency::*;
+        assert_eq!(PackageManager::Pacman.package_name(OpenSsh), Some("openssh"));
+        assert_eq!(PackageManager::Apt.package_name(OpenSsh), Some("openssh-client"));
+        assert_eq!(PackageManager::Dnf.package_name(OpenSsh), Some("openssh-clients"));
+        assert_eq!(PackageManager::Zypper.package_name(OpenSsh), Some("openssh-clients"));
+        for pm in [
+            PackageManager::Pacman,
+            PackageManager::Apt,
+            PackageManager::Dnf,
+            PackageManager::Zypper,
+        ] {
+            assert_eq!(pm.package_name(Tun2Socks), Some("badvpn"));
+        }
+        assert_eq!(OpenSsh.label(), "OpenSSH client (ssh \u{2265} 8.4)");
+        assert_eq!(Tun2Socks.label(), "tun2socks (badvpn-tun2socks)");
+    }
+
+    #[test]
+    fn ssh_missing_computed_from_exes_and_version() {
+        let all = |_: &str| true;
+        assert!(compute_ssh_missing(all, Some("OpenSSH_9.6p1")).is_empty());
+        assert_eq!(
+            compute_ssh_missing(all, Some("OpenSSH_8.3p1")),
+            vec![Dependency::OpenSsh]
+        );
+        assert_eq!(
+            compute_ssh_missing(|e| e == "ssh", Some("OpenSSH_9.6p1")),
+            vec![Dependency::OpenSsh, Dependency::Tun2Socks]
+        );
+        assert_eq!(
+            compute_ssh_missing(|e| e == "badvpn-tun2socks", None),
+            vec![Dependency::OpenSsh]
+        );
     }
 }
