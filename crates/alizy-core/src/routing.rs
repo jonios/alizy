@@ -1,11 +1,13 @@
 //! Routing and DNS plans. Pure functions that produce argv vectors; the daemon
 //! executes them without a shell.
 
-use crate::config::PublicConfig;
+use crate::config::{PublicConfig, PublicPeer};
 use crate::firewall::{NetworkPolicy, FWMARK};
+use crate::keys::PublicKey;
+use crate::ssh::SshPublic;
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 /// Policy-routing table id (same value as the fwmark, like wg-quick).
 pub const ROUTE_TABLE: u32 = FWMARK;
@@ -273,10 +275,89 @@ pub fn compatibility_warnings(cfg: &PublicConfig, policy: &NetworkPolicy) -> Vec
     w
 }
 
+/// SSH tunnel TUN address (v4) and the address tun2socks uses on its netif.
+pub const SSH_TUN_V4: &str = "198.18.0.1/30";
+pub const SSH_NETIF_V4: Ipv4Addr = Ipv4Addr::new(198, 18, 0, 2);
+/// SSH tunnel TUN address (v6) and the tun2socks netif address.
+pub const SSH_TUN_V6: &str = "fd4a:5a00::1/126";
+pub const SSH_NETIF_V6: Ipv6Addr = Ipv6Addr::new(0xfd4a, 0x5a00, 0, 0, 0, 0, 0, 2);
+/// MTU of the SSH TUN device.
+pub const SSH_TUN_MTU: u16 = 1500;
+/// Local DNS forwarder the system resolver is pointed at during an SSH tunnel.
+pub const SSH_DNS_FORWARDER: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 77, 0, 1)), 53);
+
+/// Synthesise a `PublicConfig` for the SSH TUN so the WireGuard `route_plan`
+/// and `compatibility_warnings` apply unchanged. The single peer is a
+/// full-tunnel placeholder with no endpoint; its all-zero public key (and the
+/// all-zero interface key) are obviously synthetic and never used for crypto.
+pub fn ssh_public_config(_p: &SshPublic, policy: &NetworkPolicy) -> PublicConfig {
+    let zero = PublicKey::parse("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").expect("all-zero key is valid base64");
+    let mut addresses = vec![SSH_TUN_V4.parse::<IpNet>().expect("valid constant")];
+    if policy.ipv6_enabled {
+        addresses.push(SSH_TUN_V6.parse::<IpNet>().expect("valid constant"));
+    }
+    PublicConfig {
+        interface_public_key: zero,
+        addresses,
+        dns: vec![SSH_DNS_FORWARDER.ip()],
+        dns_search: Vec::new(),
+        mtu: Some(SSH_TUN_MTU),
+        listen_port: None,
+        peers: vec![PublicPeer {
+            public_key: zero,
+            has_preshared_key: false,
+            allowed_ips: vec!["0.0.0.0/0".parse().expect("valid"), "::/0".parse().expect("valid")],
+            endpoint: None,
+            persistent_keepalive: None,
+        }],
+    }
+}
+
+/// System DNS plan for SSH: always the local forwarder, routed for every
+/// lookup (`route_all` renders as `~.`), regardless of `custom_dns`, which
+/// instead feeds the forwarder's upstreams (see [`ssh_upstreams`]).
+pub fn ssh_dns_plan(_policy: &NetworkPolicy) -> DnsPlan {
+    DnsPlan {
+        servers: vec![SSH_DNS_FORWARDER.ip()],
+        search: Vec::new(),
+        route_all: true,
+    }
+}
+
+/// Upstream resolvers for the DNS forwarder: `custom_dns` if set, else the
+/// profile's (or default) servers, limited to enabled IP families. If that
+/// filtering leaves nothing, fall back to the unfiltered list's IPv4 entries,
+/// and finally to the unfiltered list, so the forwarder always has an upstream.
+pub fn ssh_upstreams(p: &SshPublic, policy: &NetworkPolicy) -> Vec<IpAddr> {
+    let all = if policy.custom_dns.is_empty() {
+        p.dns_servers()
+    } else {
+        policy.custom_dns.clone()
+    };
+    let filtered: Vec<IpAddr> = all
+        .iter()
+        .copied()
+        .filter(|ip| match ip {
+            IpAddr::V4(_) => policy.ipv4_enabled,
+            IpAddr::V6(_) => policy.ipv6_enabled,
+        })
+        .collect();
+    if !filtered.is_empty() {
+        return filtered;
+    }
+    let v4: Vec<IpAddr> = all.iter().copied().filter(IpAddr::is_ipv4).collect();
+    if v4.is_empty() {
+        all
+    } else {
+        v4
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{parse, tests::sample};
+    use crate::ssh::DEFAULT_SSH_DNS;
 
     fn cfg() -> PublicConfig {
         parse(&sample()).unwrap().config.split().0
@@ -344,5 +425,85 @@ mod tests {
             },
         );
         assert!(w.iter().any(|x| x.contains("cannot carry any traffic")));
+    }
+
+    fn ssh() -> SshPublic {
+        SshPublic {
+            host: "192.0.2.10".parse().unwrap(),
+            port: 22,
+            username: "alice".into(),
+            host_key: None,
+            dns: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn ssh_route_plan_defaults_to_tun() {
+        let pol = NetworkPolicy::default();
+        let c = ssh_public_config(&ssh(), &pol);
+        assert_eq!(c.mtu, Some(1500));
+        let p = route_plan(&c, "alizy0", &pol);
+        let flat: Vec<String> = p.up.iter().map(|a| a.join(" ")).collect();
+        assert!(flat.contains(&"ip -4 route replace 0.0.0.0/0 dev alizy0 table 19034".to_string()));
+        assert!(flat.iter().any(|l| l.contains("198.18.0.1/30")), "{flat:?}");
+        assert!(flat.iter().any(|l| l.contains("fd4a:5a00::1/126")), "{flat:?}");
+        assert!(flat.contains(&"ip link set dev alizy0 mtu 1500 up".to_string()));
+        assert!(compatibility_warnings(&c, &pol).is_empty());
+    }
+
+    #[test]
+    fn ssh_route_plan_omits_v6_when_disabled() {
+        let pol = NetworkPolicy {
+            ipv6_enabled: false,
+            ..Default::default()
+        };
+        let c = ssh_public_config(&ssh(), &pol);
+        assert!(c.addresses.iter().all(|a| matches!(a, IpNet::V4(_))));
+        let p = route_plan(&c, "alizy0", &pol);
+        assert!(!p.full_tunnel_v6);
+        assert!(p.up.iter().all(|a| a[1] != "-6"));
+        assert!(compatibility_warnings(&c, &pol).is_empty());
+    }
+
+    #[test]
+    fn ssh_dns_plan_points_to_forwarder_even_with_custom_dns() {
+        let pol = NetworkPolicy {
+            custom_dns: vec!["9.9.9.9".parse().unwrap()],
+            ..Default::default()
+        };
+        let d = ssh_dns_plan(&pol);
+        assert_eq!(d.servers, vec!["127.77.0.1".parse::<IpAddr>().unwrap()]);
+        let cmds = d.resolvectl_commands("alizy0");
+        assert_eq!(cmds[0], vec!["resolvectl", "dns", "alizy0", "127.77.0.1"]);
+        assert_eq!(cmds[1], vec!["resolvectl", "domain", "alizy0", "~."]);
+    }
+
+    #[test]
+    fn ssh_upstreams_prefer_custom_dns() {
+        let mut p = ssh();
+        assert_eq!(ssh_upstreams(&p, &NetworkPolicy::default()), DEFAULT_SSH_DNS.to_vec());
+        p.dns = vec!["8.8.8.8".parse().unwrap()];
+        assert_eq!(
+            ssh_upstreams(&p, &NetworkPolicy::default()),
+            vec!["8.8.8.8".parse::<IpAddr>().unwrap()]
+        );
+        let pol = NetworkPolicy {
+            custom_dns: vec!["9.9.9.9".parse().unwrap()],
+            ..Default::default()
+        };
+        assert_eq!(ssh_upstreams(&p, &pol), vec!["9.9.9.9".parse::<IpAddr>().unwrap()]);
+    }
+
+    #[test]
+    fn ssh_upstreams_filter_families_with_fallback() {
+        let mut p = ssh();
+        p.dns = vec!["2606:4700:4700::1111".parse().unwrap(), "1.1.1.1".parse().unwrap()];
+        let pol = NetworkPolicy {
+            ipv6_enabled: false,
+            ..Default::default()
+        };
+        assert_eq!(ssh_upstreams(&p, &pol), vec!["1.1.1.1".parse::<IpAddr>().unwrap()]);
+        p.dns = vec!["2606:4700:4700::1111".parse().unwrap()];
+        assert_eq!(ssh_upstreams(&p, &pol), p.dns);
     }
 }
