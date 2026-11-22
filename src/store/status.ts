@@ -96,6 +96,8 @@ export const useStatus = create<StatusState>((set, get) => ({
           });
         } else if (e.code === "password_needed") {
           flow.openPassword(id);
+        } else if (e.code === "cancelled") {
+          // Superseded by a disconnect or another connect: nothing to report.
         } else if (e.code === "auth_failed") {
           toast.error("Could not connect", "Authentication failed: check the username and password.");
         } else {

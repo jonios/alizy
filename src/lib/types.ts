@@ -121,6 +121,7 @@ export type ConnectErrorCode =
   | "host_key_changed"
   | "auth_failed"
   | "missing_dependency"
+  | "cancelled"
   | "password_needed"
   | "tunnel"
   | "bad_request"

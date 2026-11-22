@@ -101,10 +101,22 @@ function ipv6Groups(s: string): number[] | null {
   return [...head, ...new Array<number>(fill).fill(0), ...tail];
 }
 
-/** Returns an error message for a host that is not an acceptable SSH server literal, else null. */
+/** The IPv4 address inside an IPv4-mapped IPv6 literal (`::ffff:a.b.c.d`), else null. */
+export function ipv4FromMapped(raw: string): string | null {
+  const g = ipv6Groups(raw.trim());
+  if (!g || !g.slice(0, 5).every((x) => x === 0) || g[5] !== 0xffff) return null;
+  return [g[6] >> 8, g[6] & 0xff, g[7] >> 8, g[7] & 0xff].join(".");
+}
+
+/**
+ * Returns an error message for a host that is not an acceptable SSH server literal, else null.
+ * IPv4-mapped IPv6 input is accepted and checked as the IPv4 address it carries: the backend
+ * stores it in that IPv4 form (core validation rejects the mapped form itself).
+ */
 export function sshHostError(raw: string): string | null {
-  const host = raw.trim();
-  if (!host) return "Enter the server's IP address.";
+  const trimmed = raw.trim();
+  if (!trimmed) return "Enter the server's IP address.";
+  const host = ipv4FromMapped(trimmed) ?? trimmed;
   if (isIPv4(host)) {
     const first = Number(host.split(".")[0]);
     if (host === "0.0.0.0") return "0.0.0.0 is not a valid server address.";
