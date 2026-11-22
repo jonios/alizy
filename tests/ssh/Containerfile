@@ -1,0 +1,12 @@
+# Throwaway SSH server for Alizy SSH-tunnel validation (tests/ssh/README.md).
+# It needs no internet egress while the tunnel is up: test targets live on the
+# container's own loopback (1.1.1.1 / 9.9.9.9 DNS via dnsmasq, 10.99.0.1 HTTP).
+FROM docker.io/library/alpine:3.20
+RUN apk add --no-cache openssh-server dnsmasq python3 iproute2 \
+ && ssh-keygen -A \
+ && adduser -D -s /bin/sh alice \
+ && printf 'Port 22\nPasswordAuthentication yes\nKbdInteractiveAuthentication no\nPermitRootLogin no\nAllowTcpForwarding yes\nUsePAM no\n' > /etc/ssh/sshd_config \
+ && mkdir -p /srv/www && echo via-ssh-tunnel > /srv/www/index.html \
+ && printf 'listen-address=1.1.1.1,9.9.9.9\nbind-interfaces\nno-resolv\naddress=/alizy-test.example/10.99.0.1\nlocal=/example/\n' > /etc/dnsmasq.conf
+COPY entrypoint.sh /entrypoint.sh
+ENTRYPOINT ["/bin/sh", "/entrypoint.sh"]
