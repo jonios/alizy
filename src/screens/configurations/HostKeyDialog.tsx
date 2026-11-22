@@ -1,5 +1,5 @@
 import { ShieldAlert, ShieldQuestion } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../../components/ui/dialog";
 import { Button } from "../../components/ui/button";
 import { api } from "../../lib/api";
@@ -35,6 +35,7 @@ function HostKeyDialog() {
   const profile = useProfiles((s) => s.profiles.find((p) => p.id === prompt?.profileId));
   const [busy, setBusy] = useState(false);
   const [armed, setArmed] = useState(false);
+  const cancelRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     setArmed(false);
@@ -65,7 +66,12 @@ function HostKeyDialog() {
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && !busy && close()}>
-      <DialogContent size="md" hideClose onOpenAutoFocus={(e) => e.preventDefault()}>
+      <DialogContent size="md" hideClose
+        onOpenAutoFocus={(e) => {
+          e.preventDefault();
+          cancelRef.current?.focus();
+        }}
+      >
         {prompt && (
           <>
             <DialogHeader className="pr-6">
@@ -98,7 +104,7 @@ function HostKeyDialog() {
               )}
             </DialogBody>
             <DialogFooter>
-              <Button variant="ghost" autoFocus onClick={close} disabled={busy}>
+              <Button ref={cancelRef} variant="ghost" onClick={close} disabled={busy}>
                 Cancel
               </Button>
               {changed ? (

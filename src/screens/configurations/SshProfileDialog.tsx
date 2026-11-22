@@ -1,5 +1,5 @@
 import { Info } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../../components/ui/dialog";
 import { Button } from "../../components/ui/button";
 import { Field, Input } from "../../components/ui/input";
@@ -40,27 +40,37 @@ export function SshProfileDialog({
   focusPassword?: boolean;
   onSaved?: (p: ProfileSummary) => void;
 }) {
+  // The form (and the typed password in its state) exists only while the dialog is open.
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      {open && <SshDialogBody onOpenChange={onOpenChange} profile={profile} focusPassword={focusPassword} onSaved={onSaved} />}
+    </Dialog>
+  );
+}
+
+function SshDialogBody({
+  onOpenChange,
+  profile,
+  focusPassword,
+  onSaved,
+}: {
+  onOpenChange: (o: boolean) => void;
+  profile?: ProfileSummary | null;
+  focusPassword?: boolean;
+  onSaved?: (p: ProfileSummary) => void;
+}) {
   const editing = !!profile;
-  const [f, setF] = useState<SshFields>(EMPTY);
+  const [f, setF] = useState<SshFields>(() =>
+    profile?.ssh
+      ? { name: profile.name, host: profile.ssh.host, port: String(profile.ssh.port), username: profile.ssh.username, password: "" }
+      : EMPTY,
+  );
   const [touched, setTouched] = useState<Partial<Record<keyof SshFields, boolean>>>({});
   const [submitted, setSubmitted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const passwordRef = useRef<HTMLInputElement>(null);
   const nameRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    setF(
-      profile?.ssh
-        ? { name: profile.name, host: profile.ssh.host, port: String(profile.ssh.port), username: profile.ssh.username, password: "" }
-        : EMPTY,
-    );
-    setTouched({});
-    setSubmitted(false);
-    setError(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, profile?.id]);
 
   const errors = validateSsh(f, { editing });
   const show = (k: keyof SshFields) => (submitted || touched[k] ? errors[k] : undefined);
@@ -78,6 +88,7 @@ export function SshProfileDialog({
       const saved = profile
         ? await api.updateSsh(profile.id, f.name.trim(), host, port, f.username, f.password || null)
         : await api.createSsh(f.name.trim(), host, port, f.username, f.password);
+      setF((p) => ({ ...p, password: "" }));
       toast.success(profile ? "Connection updated" : "Connection added", saved.name);
       void useProfiles.getState().load();
       onOpenChange(false);
@@ -90,10 +101,12 @@ export function SshProfileDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={(o) => !busy && onOpenChange(o)}>
+    <>
       <DialogContent
         size="md"
         aria-describedby={undefined}
+        onEscapeKeyDown={(e) => busy && e.preventDefault()}
+        onInteractOutside={(e) => busy && e.preventDefault()}
         onOpenAutoFocus={(e) => {
           e.preventDefault();
           (focusPassword ? passwordRef : nameRef).current?.focus();
@@ -181,6 +194,6 @@ export function SshProfileDialog({
           </DialogFooter>
         </form>
       </DialogContent>
-    </Dialog>
+    </>
   );
 }
