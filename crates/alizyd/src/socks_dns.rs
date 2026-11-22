@@ -31,6 +31,8 @@ const MAX_INFLIGHT: usize = 256;
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(3);
 /// Idle limit while a TCP client sends its next query.
 const TCP_IDLE: Duration = Duration::from_secs(10);
+/// Maximum concurrent TCP client connections; excess are closed at once.
+const MAX_TCP_CONNS: usize = 64;
 const HEADER_LEN: usize = 12;
 const MAX_UDP_NO_EDNS: usize = 512;
 const MAX_UDP_EDNS: usize = 1232;
@@ -46,6 +48,16 @@ impl DnsForwarder {
     /// Bind UDP and TCP on `listen` and relay queries through the SOCKS5
     /// proxy at `socks` to `upstreams` (tried in order, port 53).
     pub async fn start(listen: SocketAddr, socks: SocketAddr, upstreams: Vec<IpAddr>) -> io::Result<DnsForwarder> {
+        Self::start_with(listen, socks, upstreams, TCP_IDLE, MAX_TCP_CONNS).await
+    }
+
+    async fn start_with(
+        listen: SocketAddr,
+        socks: SocketAddr,
+        upstreams: Vec<IpAddr>,
+        tcp_idle: Duration,
+        max_tcp: usize,
+    ) -> io::Result<DnsForwarder> {
         // With port 0 the UDP socket must reuse the TCP port; retry on the
         // rare clash.
         let attempts = if listen.port() == 0 { 8 } else { 1 };
@@ -67,6 +79,8 @@ impl DnsForwarder {
             socks,
             upstreams,
             permits: Semaphore::new(MAX_INFLIGHT),
+            tcp_conns: Arc::new(Semaphore::new(max_tcp)),
+            tcp_idle,
         });
         let udp_task = tokio::spawn(udp_loop(Arc::new(udp), ctx.clone()));
         let tcp_task = tokio::spawn(tcp_loop(tcp, ctx));
@@ -99,6 +113,8 @@ struct Ctx {
     socks: SocketAddr,
     upstreams: Vec<IpAddr>,
     permits: Semaphore,
+    tcp_conns: Arc<Semaphore>,
+    tcp_idle: Duration,
 }
 
 async fn udp_loop(sock: Arc<UdpSocket>, ctx: Arc<Ctx>) {
@@ -152,20 +168,29 @@ async fn tcp_loop(l: TcpListener, ctx: Arc<Ctx>) {
             }
         };
         while set.try_join_next().is_some() {}
-        set.spawn(tcp_conn(s, ctx.clone()));
+        let Ok(conn) = ctx.tcp_conns.clone().try_acquire_owned() else {
+            debug!("dns tcp: connection limit reached, closing");
+            continue;
+        };
+        let ctx = ctx.clone();
+        set.spawn(async move {
+            tcp_conn(s, ctx).await;
+            drop(conn);
+        });
     }
 }
 
 async fn tcp_conn(mut s: TcpStream, ctx: Arc<Ctx>) {
     loop {
         let mut len = [0u8; 2];
-        match timeout(TCP_IDLE, s.read_exact(&mut len)).await {
+        match timeout(ctx.tcp_idle, s.read_exact(&mut len)).await {
             Ok(Ok(_)) => {}
             _ => return,
         }
         let mut q = vec![0u8; u16::from_be_bytes(len) as usize];
-        if s.read_exact(&mut q).await.is_err() || !is_query(&q) {
-            return;
+        match timeout(ctx.tcp_idle, s.read_exact(&mut q)).await {
+            Ok(Ok(_)) if is_query(&q) => {}
+            _ => return,
         }
         let Ok(permit) = ctx.permits.try_acquire() else {
             debug!("dns tcp: in-flight limit reached, closing");
@@ -177,8 +202,9 @@ async fn tcp_conn(mut s: TcpStream, ctx: Arc<Ctx>) {
         let mut out = Vec::with_capacity(r.len() + 2);
         out.extend_from_slice(&(r.len() as u16).to_be_bytes());
         out.extend_from_slice(&r);
-        if s.write_all(&out).await.is_err() {
-            return;
+        match timeout(ctx.tcp_idle, s.write_all(&out)).await {
+            Ok(Ok(_)) => {}
+            _ => return,
         }
     }
 }
@@ -327,8 +353,18 @@ fn fit_udp(query: &[u8], reply: Vec<u8>) -> Option<Vec<u8>> {
         return Some(reply);
     }
     // Header and question from the query, flags from the reply.
-    let end = question_end(query)?;
-    let mut t = query[..end].to_vec();
+    let mut t = match question_end(query) {
+        Some(end) => {
+            let mut t = query[..end].to_vec();
+            t[4..6].copy_from_slice(&1u16.to_be_bytes());
+            t
+        }
+        None => {
+            let mut h = query[..HEADER_LEN].to_vec();
+            h[4..6].fill(0);
+            h
+        }
+    };
     t[2] = reply[2] | 0x80 | 0x02;
     t[3] = reply[3];
     t[6..12].fill(0);
@@ -338,10 +374,14 @@ fn fit_udp(query: &[u8], reply: Vec<u8>) -> Option<Vec<u8>> {
 /// SERVFAIL built from the query header (and question when parseable).
 fn servfail(query: &[u8]) -> Option<Vec<u8>> {
     let mut r = match question_end(query) {
-        Some(end) => query[..end].to_vec(),
+        Some(end) => {
+            let mut r = query[..end].to_vec();
+            r[4..6].copy_from_slice(&1u16.to_be_bytes());
+            r
+        }
         None => {
             let mut h = query[..HEADER_LEN].to_vec();
-            h[4..12].fill(0);
+            h[4..6].fill(0);
             h
         }
     };
@@ -555,6 +595,84 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
         UdpSocket::bind(addr).await.unwrap();
         TcpListener::bind(addr).await.unwrap();
+    }
+
+    async fn start_short(idle_ms: u64, max_tcp: usize) -> DnsForwarder {
+        let dns = fake_dns(0).await;
+        let socks = fake_socks(HashMap::from([(UP1, Some(dns))])).await;
+        DnsForwarder::start_with(
+            "127.0.0.1:0".parse().unwrap(),
+            socks,
+            vec![UP1],
+            Duration::from_millis(idle_ms),
+            max_tcp,
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn assert_closed(c: &mut TcpStream) {
+        let mut b = [0u8; 8];
+        let n = tokio::time::timeout(Duration::from_secs(3), c.read(&mut b))
+            .await
+            .expect("connection closed in time")
+            .unwrap_or(0);
+        assert_eq!(n, 0);
+    }
+
+    #[tokio::test]
+    async fn stalled_tcp_body_is_closed_within_idle_timeout() {
+        let f = start_short(200, 64).await;
+        let mut c = TcpStream::connect(f.local_addr()).await.unwrap();
+        c.write_all(&[0xFF, 0xFF, 1, 2, 3]).await.unwrap(); // body never completes
+        assert_closed(&mut c).await;
+        f.stop();
+    }
+
+    #[tokio::test]
+    async fn tcp_connection_cap_is_enforced() {
+        let f = start_short(30_000, 2).await;
+        let _a = TcpStream::connect(f.local_addr()).await.unwrap();
+        let _b = TcpStream::connect(f.local_addr()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut c = TcpStream::connect(f.local_addr()).await.unwrap();
+        assert_closed(&mut c).await;
+        f.stop();
+    }
+
+    #[test]
+    fn truncated_and_servfail_fix_qdcount_with_two_questions() {
+        let mut q = query(3);
+        q[5] = 2;
+        q.extend_from_slice(b"\x05other\x03com\x00\x00\x01\x00\x01");
+        let one_q = query(3).len();
+        let mut reply = q.clone();
+        reply[2] |= 0x80;
+        reply.extend(std::iter::repeat_n(0, 600));
+        let t = fit_udp(&q, reply).unwrap();
+        assert_eq!(t.len(), one_q);
+        assert_eq!(&t[4..6], &[0, 1]);
+        assert!(t[2] & 0x02 != 0);
+        let sf = servfail(&q).unwrap();
+        assert_eq!(sf.len(), one_q);
+        assert_eq!(&sf[4..6], &[0, 1]);
+        assert_eq!(sf[3] & 0x0F, 2);
+    }
+
+    #[test]
+    fn oversized_reply_with_unparseable_question_gets_header_only_tc() {
+        let mut q = vec![0, 8, 0x01, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+        q.extend_from_slice(&[0x3F, b'a']); // label runs past the end
+        let mut reply = q.clone();
+        reply[2] |= 0x80;
+        reply.extend(std::iter::repeat_n(0, 600));
+        let t = fit_udp(&q, reply).unwrap();
+        assert_eq!(t.len(), HEADER_LEN);
+        assert!(t[2] & 0x02 != 0);
+        assert_eq!(&t[4..12], &[0u8; 8]);
+        let sf = servfail(&q).unwrap();
+        assert_eq!(sf.len(), HEADER_LEN);
+        assert_eq!(&sf[4..12], &[0u8; 8]);
     }
 
     #[tokio::test]
