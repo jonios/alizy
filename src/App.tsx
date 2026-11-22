@@ -15,6 +15,7 @@ import { DropOverlay } from "./components/DropOverlay";
 import { useTheme } from "./components/useTheme";
 import { Dashboard } from "./screens/dashboard/Dashboard";
 import { Configurations } from "./screens/configurations/Configurations";
+import { SshFlowDialogs } from "./screens/configurations/HostKeyDialog";
 import { ProfileDetailsSheet } from "./screens/configurations/ProfileDetails";
 import { SplitTunneling } from "./screens/split/SplitTunneling";
 import { NetworkSettings } from "./screens/network/NetworkSettings";
@@ -83,6 +84,7 @@ export default function App() {
       </div>
       <ProfileDetailsSheet />
       <ImportReportDialog />
+      <SshFlowDialogs />
       <DropOverlay />
       <Toaster />
     </TooltipProvider>

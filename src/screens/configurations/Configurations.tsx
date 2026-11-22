@@ -10,6 +10,7 @@ import {
   Search,
   SearchX,
   Star,
+  Terminal,
   Upload,
   X,
 } from "lucide-react";
@@ -36,6 +37,7 @@ import { useProfiles } from "../../store/profiles";
 import { useImportReport } from "../../store/importReport";
 import { ProfileRow } from "./ProfileRow";
 import { PasteConfigDialog } from "./PasteConfigDialog";
+import { SshProfileDialog } from "./SshProfileDialog";
 import { BackupDialog, importFiles, importFolder, restoreBackup } from "./dialogs";
 
 type Sort = "name" | "last_used" | "created";
@@ -52,6 +54,7 @@ export function Configurations() {
   const [sort, setSort] = useState<Sort>("last_used");
   const [pasteOpen, setPasteOpen] = useState(false);
   const [backupOpen, setBackupOpen] = useState(false);
+  const [sshOpen, setSshOpen] = useState(false);
 
   const categories = useMemo(() => {
     const set = new Set<string>();
@@ -69,6 +72,7 @@ export function Configurations() {
       return (
         p.name.toLowerCase().includes(q) ||
         (p.endpoint ?? "").toLowerCase().includes(q) ||
+        (p.ssh ? `${p.ssh.username}@${p.ssh.host}:${p.ssh.port}`.toLowerCase().includes(q) : false) ||
         (p.category ?? "").toLowerCase().includes(q) ||
         p.addresses.some((a) => a.toLowerCase().includes(q))
       );
@@ -121,6 +125,10 @@ export function Configurations() {
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onSelect={() => setPasteOpen(true)}>
                   <ClipboardPaste /> Paste configuration…
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onSelect={() => setSshOpen(true)}>
+                  <Terminal /> SSH connection…
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -224,6 +232,9 @@ export function Configurations() {
                   <Button variant="ghost" size="sm" onClick={() => setPasteOpen(true)}>
                     <ClipboardPaste /> Paste
                   </Button>
+                  <Button variant="ghost" size="sm" onClick={() => setSshOpen(true)}>
+                    <Terminal /> SSH connection
+                  </Button>
                 </>
               }
               className="py-16"
@@ -265,6 +276,7 @@ export function Configurations() {
       </ScreenBody>
 
       <PasteConfigDialog open={pasteOpen} onOpenChange={setPasteOpen} />
+      <SshProfileDialog open={sshOpen} onOpenChange={setSshOpen} />
       <BackupDialog open={backupOpen} onOpenChange={setBackupOpen} />
     </>
   );

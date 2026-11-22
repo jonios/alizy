@@ -73,3 +73,88 @@ export function checkDomain(input: string): DomainCheck {
   if (s.length > 253 || !labels.every((l) => LABEL.test(l))) return { ok: false, error: "Contains invalid characters or empty labels." };
   return { ok: true, domain: s, wildcard };
 }
+
+// ─── SSH connection form ───
+
+/** Expand an IPv6 literal to eight 16-bit groups, or null if it is not one. */
+function ipv6Groups(s: string): number[] | null {
+  if (!isIPv6(s)) return null;
+  const dbl = s.split("::");
+  const side = (x: string): number[] => {
+    if (x === "") return [];
+    const out: number[] = [];
+    for (const g of x.split(":")) {
+      if (g.includes(".")) {
+        const o = g.split(".").map(Number);
+        out.push((o[0] << 8) | o[1], (o[2] << 8) | o[3]);
+      } else {
+        out.push(parseInt(g, 16));
+      }
+    }
+    return out;
+  };
+  const head = side(dbl[0]);
+  if (dbl.length === 1) return head.length === 8 ? head : null;
+  const tail = side(dbl[1]);
+  const fill = 8 - head.length - tail.length;
+  if (fill < 1) return null;
+  return [...head, ...new Array<number>(fill).fill(0), ...tail];
+}
+
+/** Returns an error message for a host that is not an acceptable SSH server literal, else null. */
+export function sshHostError(raw: string): string | null {
+  const host = raw.trim();
+  if (!host) return "Enter the server's IP address.";
+  if (isIPv4(host)) {
+    const first = Number(host.split(".")[0]);
+    if (host === "0.0.0.0") return "0.0.0.0 is not a valid server address.";
+    if (first === 127) return "Loopback addresses (127.0.0.0/8) are not allowed.";
+    if (first >= 224 && first <= 239) return "Multicast addresses are not allowed.";
+    return null;
+  }
+  const g = ipv6Groups(host);
+  if (!g) return "Enter a valid IPv4 or IPv6 address (host names are not supported).";
+  if (g.every((x) => x === 0)) return ":: is not a valid server address.";
+  if (g.slice(0, 7).every((x) => x === 0) && g[7] === 1) return "The loopback address ::1 is not allowed.";
+  if ((g[0] & 0xff00) === 0xff00) return "Multicast addresses are not allowed.";
+  return null;
+}
+
+export interface SshFields {
+  name: string;
+  host: string;
+  port: string;
+  username: string;
+  password: string;
+}
+
+/** Mirrors the core validation rules. Returns field -> message (empty when valid). */
+export function validateSsh(f: SshFields, opts: { editing: boolean }): Partial<Record<keyof SshFields, string>> {
+  const errors: Partial<Record<keyof SshFields, string>> = {};
+  const name = f.name.trim();
+  if (!name) errors.name = "Enter a name.";
+  else if ([...name].length > 64) errors.name = "Use 64 characters or fewer.";
+
+  const hostErr = sshHostError(f.host);
+  if (hostErr) errors.host = hostErr;
+
+  const port = f.port.trim();
+  if (!/^\d+$/.test(port) || Number(port) < 1 || Number(port) > 65535) errors.port = "Port must be a whole number from 1 to 65535.";
+
+  const u = f.username;
+  if (!u) errors.username = "Enter the username.";
+  else if ([...u].length > 64) errors.username = "Use 64 characters or fewer.";
+  else if (/[\s\u0000-\u001f\u007f]/.test(u)) errors.username = "The username can't contain spaces or control characters.";
+  else if (u.startsWith("-")) errors.username = "The username can't start with “-”.";
+  else if (u.includes("@")) errors.username = "The username can't contain “@”.";
+
+  const p = f.password;
+  if (!p) {
+    if (!opts.editing) errors.password = "Enter the password.";
+  } else if (/[\u0000\r\n]/.test(p)) {
+    errors.password = "The password can't contain line breaks or NUL characters.";
+  } else if (new TextEncoder().encode(p).length > 1024) {
+    errors.password = "The password is too long (1024 bytes at most).";
+  }
+  return errors;
+}
