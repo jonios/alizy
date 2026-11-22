@@ -1,8 +1,11 @@
 //! One-shot askpass helper for SSH passwords.
 //!
 //! The daemon spawns OpenSSH as the unprivileged `alizy-ssh` user with
-//! `SSH_ASKPASS_REQUIRE=force`; ssh then runs `alizyd --askpass <prompt>` to get
-//! the password. ssh closes inherited descriptors above 2, so the password
+//! `SSH_ASKPASS_REQUIRE=force` and `SSH_ASKPASS=<alizyd exe>`. ssh runs
+//! `execlp(SSH_ASKPASS, SSH_ASKPASS, prompt)`, i.e. plain `alizyd "<prompt>"`
+//! with no flag, so client mode is selected by the environment: exactly one
+//! argument, `ALIZY_ASKPASS_SOCK` set and a non-root euid (see
+//! [`invoked_as_client`]). `alizyd --askpass <prompt>` is accepted too. ssh closes inherited descriptors above 2, so the password
 //! cannot travel over a pipe. Instead [`AskpassServer`] binds a Unix socket
 //! `<dir>/<id>.askpass` (mode 0600, owned by the allowed uid) and hands the
 //! password to exactly one client that
@@ -10,6 +13,10 @@
 //! 1. is running as `allowed_uid` (checked with `SO_PEERCRED`), and
 //! 2. sends the random 256-bit token from `ALIZY_ASKPASS_TOKEN` as its first line
 //!    (compared in constant time).
+//!
+//! The reply is the password followed by `\n`; the client prints nothing unless
+//! that terminator arrived, so a truncated reply never becomes a wrong password.
+//! Passwords containing `\n` or `\r` are refused up front.
 //!
 //! A connection failing either check is closed without any data and does **not**
 //! consume the one-shot: only `allowed_uid` (and root) can open a 0600 socket
@@ -21,6 +28,7 @@
 //! The password never appears in argv, the environment, logs or files.
 #![cfg_attr(not(test), allow(dead_code))]
 
+use std::ffi::OsString;
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -83,6 +91,19 @@ impl AskpassServer {
         if !safe_id(id) {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "unsafe askpass id"));
         }
+        if allowed_uid == 0 {
+            // ssh must never run as root; the client also refuses euid 0.
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "askpass uid must not be root",
+            ));
+        }
+        if password.contains(['\n', '\r']) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "password contains a line break",
+            ));
+        }
         let exe = std::env::current_exe()?;
         let token = random_token()?;
         let path = dir.join(format!("{id}.askpass"));
@@ -122,6 +143,13 @@ impl AskpassServer {
     }
 
     /// Environment for the ssh child (it also needs its own PATH/HOME etc.).
+    /// Tests point `SSH_ASKPASS` at the built `alizyd` (the test harness is
+    /// `current_exe()` there).
+    #[cfg(test)]
+    fn set_exe(&mut self, exe: PathBuf) {
+        self.exe = exe;
+    }
+
     pub fn env(&self) -> Vec<(String, String)> {
         vec![
             ("SSH_ASKPASS".into(), self.exe.to_string_lossy().into_owned()),
@@ -198,6 +226,7 @@ async fn handle(mut stream: UnixStream, token: &str, password: &str, allowed_uid
     }
     let _ = tokio::time::timeout(IO_TIMEOUT, async {
         stream.write_all(password.as_bytes()).await?;
+        stream.write_all(b"\n").await?;
         stream.shutdown().await
     })
     .await;
@@ -231,20 +260,60 @@ fn fetch(prompt: &str, sock: &str, token: &str) -> Option<Zeroizing<Vec<u8>>> {
             Err(_) => return None,
         }
     }
-    if n == 0 {
+    // Require the terminator: a short read must not become a wrong password.
+    if n == 0 || buf[n - 1] != b'\n' {
         return None;
     }
-    buf.truncate(n);
-    Some(buf)
+    let pw = &buf[..n - 1];
+    if pw.is_empty() || pw.iter().any(|&b| b == b'\n' || b == b'\r') {
+        return None;
+    }
+    let mut out = Zeroizing::new(Vec::with_capacity(pw.len()));
+    out.extend_from_slice(pw);
+    Some(out)
 }
 
-/// `alizyd --askpass <prompt>`: print the password + newline and return 0, or
-/// return 1 with no output at all.
+/// Decide whether argv/env describe an askpass client invocation.
+///
+/// * `alizyd --askpass PROMPT` (explicit form). Any other argument count after
+///   `--askpass` is still client mode, and malformed: `Some(None)`.
+/// * `alizyd PROMPT`, exactly how ssh calls `SSH_ASKPASS`, but only when
+///   `ALIZY_ASKPASS_SOCK` is set and the process is not root. The daemon itself
+///   runs as root and never has that variable.
+///
+/// Returns `None` for a normal daemon invocation.
+fn client_prompt(args: &[OsString], sock_env_set: bool, euid: u32) -> Option<Option<OsString>> {
+    if args.get(1).is_some_and(|a| a == "--askpass") {
+        return Some((args.len() == 3).then(|| args[2].clone()));
+    }
+    if args.len() == 2 && sock_env_set && euid != 0 {
+        return Some(Some(args[1].clone()));
+    }
+    None
+}
+
+fn current_client_prompt() -> Option<Option<OsString>> {
+    let args: Vec<OsString> = std::env::args_os().collect();
+    client_prompt(
+        &args,
+        std::env::var_os(ENV_SOCK).is_some(),
+        nix::unistd::geteuid().as_raw(),
+    )
+}
+
+/// True when this process was started as an askpass client (by ssh via
+/// `SSH_ASKPASS`, or explicitly with `--askpass`). Cheap and side-effect free;
+/// `main` checks it before any other setup.
+pub fn invoked_as_client() -> bool {
+    current_client_prompt().is_some()
+}
+
+/// Askpass client (`alizyd PROMPT` from ssh, or `alizyd --askpass PROMPT`):
+/// print the password + newline and return 0, or return 1 with no output at all.
 pub fn run_client() -> i32 {
     // This process briefly holds the password.
     let _ = nix::sys::prctl::set_dumpable(false);
-    let mut args = std::env::args_os().skip(2);
-    let (Some(prompt), None) = (args.next(), args.next()) else {
+    let Some(Some(prompt)) = current_client_prompt() else {
         return 1;
     };
     let (Ok(sock), Ok(token)) = (std::env::var(ENV_SOCK), std::env::var(ENV_TOKEN)) else {
@@ -270,6 +339,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::os::unix::net::UnixStream;
+    use std::os::unix::process::CommandExt;
 
     fn uid() -> u32 {
         nix::unistd::getuid().as_raw()
@@ -387,7 +457,7 @@ mod tests {
         assert!(raw(sock.clone(), b"\n".to_vec()).await.is_empty());
         assert!(raw(sock.clone(), format!("{tok}x\n").into_bytes()).await.is_empty());
         // A wrong-token attempt does not consume the one-shot.
-        assert_eq!(raw(sock, format!("{tok}\n").into_bytes()).await, b"hunter2 pw");
+        assert_eq!(raw(sock, format!("{tok}\n").into_bytes()).await, b"hunter2 pw\n");
     }
 
     #[tokio::test]
@@ -411,7 +481,10 @@ mod tests {
         let s = start(dir.path()).await;
         let sock = env_of(&s, "ALIZY_ASKPASS_SOCK");
         let tok = env_of(&s, "ALIZY_ASKPASS_TOKEN");
-        assert_eq!(raw(sock.clone(), format!("{tok}\n").into_bytes()).await, b"hunter2 pw");
+        assert_eq!(
+            raw(sock.clone(), format!("{tok}\n").into_bytes()).await,
+            b"hunter2 pw\n"
+        );
         assert!(raw(sock.clone(), format!("{tok}\n").into_bytes()).await.is_empty());
         assert!(client("x's password: ", sock, tok).await.is_none());
     }
@@ -423,7 +496,10 @@ mod tests {
         let sock = env_of(&s, "ALIZY_ASKPASS_SOCK");
         let tok = env_of(&s, "ALIZY_ASKPASS_TOKEN");
         assert!(Path::new(&sock).exists());
-        assert_eq!(raw(sock.clone(), format!("{tok}\n").into_bytes()).await, b"hunter2 pw");
+        assert_eq!(
+            raw(sock.clone(), format!("{tok}\n").into_bytes()).await,
+            b"hunter2 pw\n"
+        );
         // Removal happens right after the write; give the task a moment.
         for _ in 0..50 {
             if !Path::new(&sock).exists() {
@@ -456,7 +532,7 @@ mod tests {
             assert!(client(p, sock.clone(), tok.clone()).await.is_none(), "{p}");
         }
         // Refusals never touched the server: the password is still there.
-        assert_eq!(raw(sock, format!("{tok}\n").into_bytes()).await, b"hunter2 pw");
+        assert_eq!(raw(sock, format!("{tok}\n").into_bytes()).await, b"hunter2 pw\n");
     }
 
     #[tokio::test]
@@ -466,11 +542,80 @@ mod tests {
         assert!(client("x's password: ", sock, "00".repeat(32)).await.is_none());
     }
 
-    /// End-to-end through the real binary: `cargo build -p alizyd && cargo test
-    /// -p alizyd askpass -- --ignored`.
     #[tokio::test]
-    #[ignore]
-    async fn e2e_binary_prints_password() {
+    async fn rejects_root_uid() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = AskpassServer::start(dir.path(), "p", Zeroizing::new("pw".into()), 0).await;
+        assert_eq!(r.err().map(|e| e.kind()), Some(io::ErrorKind::InvalidInput));
+        assert!(!dir.path().join("p.askpass").exists());
+    }
+
+    #[tokio::test]
+    async fn rejects_password_with_line_break() {
+        let dir = tempfile::tempdir().unwrap();
+        for pw in ["a\nb", "pw\n", "a\rb", "\r"] {
+            let r = AskpassServer::start(dir.path(), "p", Zeroizing::new(pw.into()), uid()).await;
+            assert_eq!(r.err().map(|e| e.kind()), Some(io::ErrorKind::InvalidInput), "{pw:?}");
+            assert!(!dir.path().join("p.askpass").exists());
+        }
+    }
+
+    /// A fake server that answers any request with `reply`, then closes.
+    fn fake_server(dir: &Path, reply: &'static [u8]) -> String {
+        let sock = dir.join("fake.askpass");
+        let l = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut c, _)) = l.accept() {
+                let mut b = [0u8; 128];
+                let _ = c.read(&mut b);
+                let _ = c.write_all(reply);
+            }
+        });
+        sock.to_string_lossy().into_owned()
+    }
+
+    #[tokio::test]
+    async fn truncated_reply_gets_nothing() {
+        for reply in [&b"hunter2"[..], b"", b"\n", b"a\nb\n", b"a\rb\n"] {
+            let dir = tempfile::tempdir().unwrap();
+            let sock = fake_server(dir.path(), reply);
+            assert!(
+                client("x's password: ", sock, "00".repeat(32)).await.is_none(),
+                "{reply:?}"
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let sock = fake_server(dir.path(), b"ok pw\n");
+        assert_eq!(
+            client("x's password: ", sock, "00".repeat(32)).await.as_deref(),
+            Some(&b"ok pw"[..])
+        );
+    }
+
+    #[test]
+    fn client_dispatch_rules() {
+        let a = |v: &[&str]| v.iter().map(OsString::from).collect::<Vec<_>>();
+        let p = |s: &str| Some(Some(OsString::from(s)));
+        // ssh's shape: argv = [SSH_ASKPASS, prompt].
+        assert_eq!(
+            client_prompt(&a(&["alizyd", "u@h's password: "]), true, 1000),
+            p("u@h's password: ")
+        );
+        // Not without the socket env, and never as root (the daemon).
+        assert_eq!(client_prompt(&a(&["alizyd", "u@h's password: "]), false, 1000), None);
+        assert_eq!(client_prompt(&a(&["alizyd", "--probe"]), true, 0), None);
+        assert_eq!(client_prompt(&a(&["alizyd"]), true, 1000), None);
+        assert_eq!(client_prompt(&a(&["alizyd", "--socket", "/x"]), true, 1000), None);
+        // Explicit form, regardless of env/euid; malformed is still client mode.
+        assert_eq!(client_prompt(&a(&["alizyd", "--askpass", "pw: "]), false, 0), p("pw: "));
+        assert_eq!(client_prompt(&a(&["alizyd", "--askpass"]), false, 1000), Some(None));
+        assert_eq!(
+            client_prompt(&a(&["alizyd", "--askpass", "a", "b"]), true, 1000),
+            Some(None)
+        );
+    }
+
+    fn built_alizyd() -> PathBuf {
         let bin = std::env::current_exe()
             .unwrap()
             .parent()
@@ -479,30 +624,161 @@ mod tests {
             .unwrap()
             .join("alizyd");
         assert!(bin.exists(), "build the binary first: {}", bin.display());
+        bin
+    }
+
+    /// End-to-end through the real binary, invoked exactly as ssh does:
+    /// `execlp(SSH_ASKPASS, SSH_ASKPASS, prompt)` with only `env()` + PATH.
+    /// Run: `cargo build -p alizyd && cargo test -p alizyd -- --ignored askpass`.
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_binary_prints_password() {
         let dir = tempfile::tempdir().unwrap();
-        let s = start(dir.path()).await;
-        let env: Vec<(String, String)> = s.env().into_iter().filter(|(k, _)| k != "SSH_ASKPASS").collect();
-        let run = |prompt: &'static str| {
-            let bin = bin.clone();
-            let env = env.clone();
+        let mut s = start(dir.path()).await;
+        s.set_exe(built_alizyd());
+        let mut env = s.env();
+        env.push(("PATH".into(), "/usr/bin:/bin".into()));
+        let askpass = env_of(&s, "SSH_ASKPASS");
+        let run = |prompt: &'static str, env: Vec<(String, String)>| {
+            let askpass = askpass.clone();
             tokio::task::spawn_blocking(move || {
-                std::process::Command::new(bin)
-                    .args(["--askpass", prompt])
+                std::process::Command::new(&askpass)
+                    .arg0(&askpass)
+                    .arg(prompt)
                     .env_clear()
                     .envs(env)
                     .output()
                     .unwrap()
             })
         };
-        let refused = run("Are you sure (yes/no)? ").await.unwrap();
+        let refused = run("Are you sure (yes/no)? ", env.clone()).await.unwrap();
         assert_eq!(refused.status.code(), Some(1));
         assert!(refused.stdout.is_empty() && refused.stderr.is_empty());
-        let out = run("x's password: ").await.unwrap();
-        assert_eq!(out.status.code(), Some(0));
+        let out = run("x's password: ", env.clone()).await.unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         assert_eq!(out.stdout, b"hunter2 pw\n");
         assert!(out.stderr.is_empty());
-        let again = run("x's password: ").await.unwrap();
+        let again = run("x's password: ", env.clone()).await.unwrap();
         assert_eq!(again.status.code(), Some(1));
         assert!(again.stdout.is_empty() && again.stderr.is_empty());
+
+        // Truncated reply from the socket: exit 1, no output.
+        let fake = fake_server(dir.path(), b"hunter2");
+        let env2: Vec<(String, String)> = env
+            .iter()
+            .map(|(k, v)| {
+                if k == ENV_SOCK {
+                    (k.clone(), fake.clone())
+                } else {
+                    (k.clone(), v.clone())
+                }
+            })
+            .collect();
+        let trunc = run("x's password: ", env2).await.unwrap();
+        assert_eq!(trunc.status.code(), Some(1));
+        assert!(trunc.stdout.is_empty() && trunc.stderr.is_empty());
+    }
+
+    /// Real OpenSSH against a throwaway unprivileged sshd on loopback. The login
+    /// is for a nonexistent user, so it must fail, but ssh can only send a
+    /// password after running `SSH_ASKPASS` in client mode. So the one-shot is
+    /// consumed (socket unlinked) only if dispatch works. Skips if
+    /// ssh/sshd/ssh-keygen are missing.
+    #[tokio::test]
+    #[ignore]
+    async fn e2e_real_ssh_invokes_askpass() {
+        let tools = ["/usr/bin/ssh", "/usr/bin/sshd", "/usr/bin/ssh-keygen"];
+        if tools.iter().any(|t| !Path::new(t).exists()) {
+            eprintln!("skipping: OpenSSH client/server not installed");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let st = std::process::Command::new("/usr/bin/ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+            .arg(d.join("hk"))
+            .status()
+            .unwrap();
+        assert!(st.success());
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        std::fs::write(
+            d.join("sshd_config"),
+            format!(
+                "Port {port}\nListenAddress 127.0.0.1\nHostKey {}\nPidFile none\nUsePAM no\n\
+                 PasswordAuthentication yes\nKbdInteractiveAuthentication no\nStrictModes no\n",
+                d.join("hk").display()
+            ),
+        )
+        .unwrap();
+        let mut sshd = std::process::Command::new("/usr/bin/sshd")
+            .args(["-D", "-e", "-f"])
+            .arg(d.join("sshd_config"))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        // Wait for sshd to listen.
+        for _ in 0..100 {
+            if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        let mut s = start(d).await;
+        s.set_exe(built_alizyd());
+        let sock = env_of(&s, "ALIZY_ASKPASS_SOCK");
+        let mut env = s.env();
+        env.push(("PATH".into(), "/usr/bin:/bin".into()));
+        env.push(("HOME".into(), d.to_string_lossy().into_owned()));
+        let out = tokio::task::spawn_blocking(move || {
+            std::process::Command::new("/usr/bin/ssh")
+                .args([
+                    "-F",
+                    "/dev/null",
+                    "-o",
+                    "BatchMode=no",
+                    "-o",
+                    "NumberOfPasswordPrompts=1",
+                ])
+                .args(["-o", "ConnectTimeout=2", "-o", "StrictHostKeyChecking=no"])
+                .args([
+                    "-o",
+                    "UserKnownHostsFile=/dev/null",
+                    "-o",
+                    "PreferredAuthentications=password",
+                ])
+                .args(["-o", "PubkeyAuthentication=no", "-p", &port.to_string()])
+                .arg("alizy-nonexistent-user@127.0.0.1")
+                .arg("true")
+                .stdin(std::process::Stdio::null())
+                .env_clear()
+                .envs(env)
+                .output()
+                .unwrap()
+        })
+        .await
+        .unwrap();
+        let _ = sshd.kill();
+        let _ = sshd.wait();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!stderr.contains("unknown argument"), "{stderr}");
+        assert!(!stderr.contains("hunter2"), "password leaked to ssh stderr");
+        assert!(stderr.contains("Permission denied"), "{stderr}");
+        // ssh ran our askpass in client mode and it fetched the password.
+        assert!(
+            !Path::new(&sock).exists(),
+            "askpass was never consumed; ssh stderr: {stderr}"
+        );
+        drop(s);
     }
 }

@@ -29,9 +29,11 @@ fn main() {
 
 #[cfg(target_os = "linux")]
 fn main() {
-    // ssh runs `alizyd --askpass <prompt>` as the unprivileged alizy-ssh user.
-    // Handle it before any logging, runtime or root-only setup.
-    if std::env::args_os().nth(1).is_some_and(|a| a == "--askpass") {
+    // ssh runs `$SSH_ASKPASS "<prompt>"` (i.e. `alizyd "<prompt>"`, no flag) as
+    // the unprivileged alizy-ssh user, with ALIZY_ASKPASS_SOCK set; the explicit
+    // `--askpass PROMPT` form is accepted too. Handle it before any logging,
+    // runtime or root-only setup.
+    if askpass::invoked_as_client() {
         std::process::exit(askpass::run_client());
     }
     let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
