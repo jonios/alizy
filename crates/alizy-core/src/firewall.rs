@@ -310,6 +310,14 @@ impl FirewallPlan {
                     s,
                     "    oifname \"lo\" tcp dport {port} meta skuid != {uid} meta skuid != 0 reject"
                 );
+                // ...and only alizy-ssh's listener may answer from it, so a local
+                // user who binds the port before (or after) ssh cannot pose as
+                // the proxy. SYN-ACKs from a listener carry the listener's uid
+                // (skb_to_full_sk); kernel RSTs come from uid-0 control sockets.
+                let _ = writeln!(
+                    s,
+                    "    oifname \"lo\" tcp sport {port} meta skuid != {uid} meta skuid != 0 reject"
+                );
             }
         }
         s.push_str("    oifname \"lo\" accept\n");
@@ -712,9 +720,31 @@ mod tests {
             );
             let lo = pos(&r, "    oifname \"lo\" accept\n");
             assert!(pos(&r, "chain output") < rej && rej < lo);
-            assert_eq!(r.matches("oifname \"lo\"").count(), 2);
+            assert_eq!(r.matches("oifname \"lo\"").count(), 3);
         }
         assert!(!FirewallPlan::new(&policy(true), tunnel()).render().contains("skuid"));
+    }
+
+    #[test]
+    fn ssh_plan_pins_socks_listener_to_alizy_ssh() {
+        // Only alizy-ssh's listener (or a kernel socket, uid 0, e.g. the RST
+        // for a closed port) may send from the SOCKS port: another local user
+        // who binds the port first cannot impersonate the proxy.
+        for ks in [true, false] {
+            let r = FirewallPlan::new(&policy(ks), ssh_tunnel()).render();
+            let pin = pos(
+                &r,
+                "    oifname \"lo\" tcp sport 1080 meta skuid != 967 meta skuid != 0 reject\n",
+            );
+            assert!(pos(&r, "chain output") < pin && pin < pos(&r, "    oifname \"lo\" accept\n"));
+        }
+        // Without a SOCKS port (e.g. a plan used only for keyscan) there is nothing to pin.
+        let mut t = ssh_tunnel().unwrap();
+        t.socks_port = None;
+        assert!(!FirewallPlan::new(&policy(true), Some(t)).render().contains("tcp sport"));
+        assert!(!FirewallPlan::new(&policy(true), tunnel())
+            .render()
+            .contains("tcp sport"));
     }
 
     #[test]
