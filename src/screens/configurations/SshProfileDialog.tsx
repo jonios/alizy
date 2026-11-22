@@ -1,5 +1,5 @@
 import { Info } from "lucide-react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Dialog, DialogBody, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../../components/ui/dialog";
 import { Button } from "../../components/ui/button";
 import { Field, Input } from "../../components/ui/input";
@@ -41,20 +41,26 @@ export function SshProfileDialog({
   onSaved?: (p: ProfileSummary) => void;
 }) {
   // The form (and the typed password in its state) exists only while the dialog is open.
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (!open) setBusy(false);
+  }, [open]);
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      {open && <SshDialogBody onOpenChange={onOpenChange} profile={profile} focusPassword={focusPassword} onSaved={onSaved} />}
+    <Dialog open={open} onOpenChange={(o) => !busy && onOpenChange(o)}>
+      {open && <SshDialogBody onOpenChange={onOpenChange} onBusyChange={setBusy} profile={profile} focusPassword={focusPassword} onSaved={onSaved} />}
     </Dialog>
   );
 }
 
 function SshDialogBody({
   onOpenChange,
+  onBusyChange,
   profile,
   focusPassword,
   onSaved,
 }: {
   onOpenChange: (o: boolean) => void;
+  onBusyChange: (b: boolean) => void;
   profile?: ProfileSummary | null;
   focusPassword?: boolean;
   onSaved?: (p: ProfileSummary) => void;
@@ -81,6 +87,7 @@ function SshDialogBody({
     setSubmitted(true);
     if (Object.keys(errors).length > 0) return;
     setBusy(true);
+    onBusyChange(true);
     setError(null);
     try {
       const port = Number(f.port.trim());
@@ -97,6 +104,7 @@ function SshDialogBody({
       setError(errMsg(e));
     } finally {
       setBusy(false);
+      onBusyChange(false);
     }
   };
 
