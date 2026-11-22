@@ -176,7 +176,7 @@ mod linux_main {
         };
         if let Some((_, gid)) = user {
             if nix::unistd::geteuid().is_root() {
-                if let Err(e) = linux::ssh::ensure_runtime_dir(&runtime, gid) {
+                if let Err(e) = linux::ssh::ensure_runtime_dir(&runtime, 0, gid) {
                     tracing::error!("SSH runtime directory {}: {e}", runtime.display());
                 }
             }

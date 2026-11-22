@@ -246,10 +246,11 @@ impl Backend for LinuxAdapter {
         ssh::keyscan(user, host, port).await
     }
 
-    async fn ssh_missing(&self) -> Vec<String> {
-        tokio::task::spawn_blocking(alizy_core::sysprobe::ssh_missing)
+    async fn ssh_missing(&self, user: (u32, u32)) -> Vec<String> {
+        ssh::missing_deps(user)
             .await
-            .map(|m| m.iter().map(|d| d.label().to_string()).collect())
-            .unwrap_or_else(|e| vec![format!("dependency check failed: {e}")])
+            .iter()
+            .map(|d| d.label().to_string())
+            .collect()
     }
 }

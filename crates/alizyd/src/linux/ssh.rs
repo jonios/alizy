@@ -46,7 +46,9 @@ const READY_DEADLINE: Duration = Duration::from_secs(20);
 const READY_POLL: Duration = Duration::from_millis(250);
 /// One readiness probe (`socks5_connect` has no timeout of its own).
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
-const KEYSCAN_TIMEOUT: Duration = Duration::from_secs(20);
+/// Overall cap on one `ssh-keyscan` run (each connection is also capped by `-T 8`).
+const KEYSCAN_TIMEOUT: Duration = Duration::from_secs(10);
+const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_GRACE: Duration = Duration::from_secs(3);
 /// Bytes of child stderr kept for error classification.
 const STDERR_CAP: usize = 8 * 1024;
@@ -328,6 +330,12 @@ pub fn unprivileged_command(
         .stderr(Stdio::null())
         .kill_on_drop(true);
     let from_root = nix::unistd::geteuid().is_root();
+    // PR_SET_PDEATHSIG fires when the *thread* that forked the child exits, not
+    // the process. These children are spawned from tokio worker threads, which
+    // live as long as the runtime (i.e. the daemon). Never spawn them from
+    // `spawn_blocking` or inside `block_in_place`: blocking-pool threads exit
+    // after ~10 s idle, which would SIGKILL a healthy ssh/tun2socks.
+    //
     // SAFETY: the closure runs in the forked child before exec and only makes
     // async-signal-safe system calls (getgroups with a zero-size buffer, prctl);
     // it allocates nothing and touches no locks.
@@ -351,23 +359,95 @@ pub fn pick_loopback_port() -> io::Result<u16> {
     Ok(l.local_addr()?.port())
 }
 
-/// Create the runtime directory if needed and force it to 0750 root:`gid`.
-/// Run as root at startup (packaging normally creates it).
-pub fn ensure_runtime_dir(dir: &Path, gid: u32) -> io::Result<()> {
+/// Create the runtime directory if needed and force *it* (the leaf only) to
+/// 0750 `uid`:`gid` (root:alizy-ssh in production). Missing parents are
+/// created 0755 so alizy-ssh can traverse them (and e.g. `/run/alizy` keeps
+/// serving the GUI socket); existing parents are never modified. Run as root
+/// at startup (packaging normally creates it).
+pub fn ensure_runtime_dir(dir: &Path, uid: u32, gid: u32) -> io::Result<()> {
+    let mut missing = Vec::new();
+    let mut cur = dir.parent();
+    while let Some(p) = cur.filter(|p| !p.as_os_str().is_empty()) {
+        match std::fs::symlink_metadata(p) {
+            Ok(_) => break,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => missing.push(p.to_path_buf()),
+            Err(e) => return Err(e),
+        }
+        cur = p.parent();
+    }
+    for p in missing.iter().rev() {
+        std::fs::DirBuilder::new().mode(0o755).create(p)?;
+        // Explicit: the umask must not narrow a directory we created.
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755))?;
+    }
     match std::fs::symlink_metadata(dir) {
         Ok(md) if md.is_dir() => {}
         Ok(_) => return Err(io::Error::other(format!("{} is not a directory", dir.display()))),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            std::fs::DirBuilder::new().recursive(true).mode(0o750).create(dir)?;
+            std::fs::DirBuilder::new().mode(0o750).create(dir)?;
         }
         Err(e) => return Err(e),
     }
     nix::unistd::chown(
         dir,
-        Some(nix::unistd::Uid::from_raw(0)),
+        Some(nix::unistd::Uid::from_raw(uid)),
         Some(nix::unistd::Gid::from_raw(gid)),
     )?;
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o750))
+}
+
+/// uids of TCP sockets in LISTEN state on `port` (any local address) in a
+/// `/proc/net/tcp` or `/proc/net/tcp6` table. Unparseable lines are skipped.
+pub fn listen_uids(table: &str, port: u16) -> Vec<u32> {
+    const LISTEN: &str = "0A";
+    table
+        .lines()
+        .skip(1)
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            let (local, state, uid) = (f.get(1)?, f.get(3)?, f.get(7)?);
+            let p = u16::from_str_radix(local.rsplit_once(':')?.1, 16).ok()?;
+            (p == port && *state == LISTEN).then(|| uid.parse::<u32>().ok())?
+        })
+        .collect()
+}
+
+/// True only when something listens on `port` and every listener on it (IPv4
+/// or IPv6, any address) belongs to `uid`: nobody else can be answering
+/// connections to the SOCKS port.
+pub fn socks_listener_ok(tcp: &str, tcp6: &str, port: u16, uid: u32) -> bool {
+    let all: Vec<u32> = listen_uids(tcp, port)
+        .into_iter()
+        .chain(listen_uids(tcp6, port))
+        .collect();
+    !all.is_empty() && all.iter().all(|u| *u == uid)
+}
+
+fn socks_listener_ok_now(port: u16, uid: u32) -> bool {
+    let read = |p: &str| std::fs::read_to_string(p).unwrap_or_default();
+    socks_listener_ok(&read("/proc/net/tcp"), &read("/proc/net/tcp6"), port, uid)
+}
+
+/// Missing SSH dependencies. `ssh -V` runs as alizy-ssh (never root); the
+/// rules are sysprobe's.
+pub async fn missing_deps(user: (u32, u32)) -> Vec<alizy_core::sysprobe::Dependency> {
+    let ssh_v = match find_exe(SSH_EXE) {
+        Some(exe) if check_user(user).is_ok() => ssh_version(&exe, user).await,
+        _ => None,
+    };
+    alizy_core::sysprobe::compute_ssh_missing(|e| find_exe(e).is_some(), ssh_v.as_deref())
+}
+
+async fn ssh_version(exe: &str, user: (u32, u32)) -> Option<String> {
+    let mut c = unprivileged_command(exe, &["-V".to_string()], user, Path::new("/"), &[]);
+    c.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let out = tokio::time::timeout(VERSION_TIMEOUT, c.output()).await.ok()?.ok()?;
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    Some(if err.trim().is_empty() {
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    } else {
+        err
+    })
 }
 
 /// Fetch the server's host key as `alizy-ssh`.
@@ -519,7 +599,16 @@ async fn wait_ready(req: &SshUp<'_>, ssh: &mut Child, err: &TailBuf, reader: Joi
             Err(e) => return Err(SshError::Other(format!("ssh: {e}"))),
         }
         if let Ok(Ok(_conn)) = tokio::time::timeout(PROBE_TIMEOUT, socks5_connect(socks, dst)).await {
-            return Ok(());
+            // Something spoke SOCKS on the port; make sure it is ssh (alizy-ssh)
+            // and not a local user who bound the port first. The firewall also
+            // rejects other uids sending from this port; this is the second lock.
+            if socks_listener_ok_now(req.socks_port, req.user.0) {
+                return Ok(());
+            }
+            return Err(SshError::Other(format!(
+                "another process is listening on the SSH proxy port 127.0.0.1:{}; refusing to use it",
+                req.socks_port
+            )));
         }
         if tokio::time::Instant::now() >= deadline {
             return Err(SshError::Other(format!(
@@ -536,13 +625,28 @@ async fn exit_error(req: &SshUp<'_>, stderr: &str, status: &str) -> SshError {
     let p = &req.cfg.public;
     match classify_ssh_stderr(stderr) {
         Some(StderrClass::AuthFailed) => SshError::AuthFailed,
-        Some(StderrClass::HostKeyChanged) => match keyscan(req.user, p.host, p.port).await {
-            Ok(k) => SshError::HostKeyChanged(k),
-            Err(e) => SshError::Other(format!(
-                "host key verification failed and the server's current key could not be fetched: {e}"
-            )),
-        },
+        Some(StderrClass::HostKeyChanged) => host_key_failure(
+            p.host_key.as_ref(),
+            keyscan(req.user, p.host, p.port).await,
+            req.runtime,
+        ),
         None => SshError::Other(format!("ssh exited ({status}){}", suffix(stderr))),
+    }
+}
+
+/// ssh said "Host key verification failed": a real key change only if the
+/// server now presents a different key than the pinned one. The same key means
+/// ssh could not read our known_hosts file (permissions), not an attack.
+fn host_key_failure(pinned: Option<&HostKey>, scanned: Result<HostKey, String>, runtime: &Path) -> SshError {
+    match scanned {
+        Ok(k) if Some(&k) == pinned => SshError::Other(format!(
+            "host key verification failed although the key matches; check {} permissions",
+            runtime.display()
+        )),
+        Ok(k) => SshError::HostKeyChanged(k),
+        Err(e) => SshError::Other(format!(
+            "host key verification failed and the server's current key could not be fetched: {e}"
+        )),
     }
 }
 
@@ -559,15 +663,37 @@ impl SshTunnel {
         } = self;
         drop(askpass);
         dns.stop();
-        for c in [&mut ssh, &mut tun2socks] {
-            let _ = c.start_kill();
-            let _ = tokio::time::timeout(STOP_GRACE, c.wait()).await;
+        for (name, c) in [("ssh", &mut ssh), ("badvpn-tun2socks", &mut tun2socks)] {
+            let pid = c.id();
+            if let Err(e) = c.start_kill() {
+                // Already reaped children report InvalidInput: not a failure.
+                if e.kind() != io::ErrorKind::InvalidInput {
+                    tracing::warn!("could not kill {name} (pid {pid:?}): {e}");
+                }
+            }
+            if tokio::time::timeout(STOP_GRACE, c.wait()).await.is_err() {
+                tracing::warn!(
+                    "{name} (pid {pid:?}) did not exit within {}s of SIGKILL",
+                    STOP_GRACE.as_secs()
+                );
+            }
         }
         let _ = std::fs::remove_file(&known_hosts);
     }
 
-    /// `Some(reason)` once ssh or tun2socks has exited.
+    /// `Some(reason)` once ssh or tun2socks has exited. The surviving peer is
+    /// killed at once: tun2socks must not keep dialling a SOCKS port that ssh
+    /// no longer owns (another local user could bind it).
     pub fn try_exited(&mut self) -> Option<String> {
+        let r = self.check_children();
+        if r.is_some() {
+            let _ = self.ssh.start_kill();
+            let _ = self.tun2socks.start_kill();
+        }
+        r
+    }
+
+    fn check_children(&mut self) -> Option<String> {
         match self.ssh.try_wait() {
             Ok(Some(st)) => {
                 let why = match classify_ssh_stderr(&self.ssh_err.text()) {
@@ -847,6 +973,139 @@ mod tests {
         assert_eq!(keys, ["HOME", "LC_ALL", "PATH", "X_EXTRA"]);
         assert!(text.contains(&format!("PATH={}", alizy_core::sysprobe::SAFE_PATH)));
         assert!(text.contains(&format!("HOME={}", dir.path().display())));
+    }
+
+    // /proc/net/tcp as printed on a little-endian host: 127.0.0.1:1080 LISTEN
+    // by uid 967, 0.0.0.0:1080 LISTEN by uid 1000, an ESTABLISHED socket from
+    // port 1080 (uid 1000, not a listener) and an unrelated listener.
+    const PROC_TCP: &str = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:0438 00000000:0000 0A 00000000:00000000 00:00000000 00000000   967        0 41001 1 0000000000000000 100 0 0 10 0
+   1: 00000000:0438 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 41002 1 0000000000000000 100 0 0 10 0
+   2: 0100007F:0438 0100007F:A1B2 01 00000000:00000000 00:00000000 00000000  1000        0 41003 1 0000000000000000 20 4 30 10 -1
+   3: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 41004 1 0000000000000000 100 0 0 10 0
+";
+    const PROC_TCP6: &str = "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 00000000000000000000000000000000:0438 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1001        0 41005 1 0000000000000000 100 0 0 10 0
+";
+
+    #[test]
+    fn proc_net_tcp_listener_uids() {
+        assert_eq!(listen_uids(PROC_TCP, 1080), vec![967, 1000]);
+        assert_eq!(listen_uids(PROC_TCP, 8080), vec![0]);
+        assert_eq!(listen_uids(PROC_TCP, 22), Vec::<u32>::new());
+        assert_eq!(listen_uids(PROC_TCP6, 1080), vec![1001]);
+        assert_eq!(listen_uids("garbage\n  9: zz:zz 0A\n", 1080), Vec::<u32>::new());
+    }
+
+    #[test]
+    fn socks_listener_must_belong_only_to_alizy_ssh() {
+        let only_ours = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:0438 00000000:0000 0A 00000000:00000000 00:00000000 00000000   967        0 41001 1 0000000000000000 100 0 0 10 0
+";
+        assert!(socks_listener_ok(only_ours, "", 1080, 967));
+        // Another user's listener on the same port (any address, v4 or v6) fails it.
+        assert!(!socks_listener_ok(PROC_TCP, "", 1080, 967));
+        assert!(!socks_listener_ok(only_ours, PROC_TCP6, 1080, 967));
+        // No listener at all (ssh not bound yet / already gone) fails it.
+        assert!(!socks_listener_ok("", "", 1080, 967));
+        assert!(!socks_listener_ok(only_ours, "", 1080, 968));
+    }
+
+    #[test]
+    fn host_key_failure_with_matching_key_is_not_a_key_change() {
+        let k = HostKey {
+            key_type: "ssh-ed25519".into(),
+            key_b64: KEY.into(),
+        };
+        let rt = Path::new("/run/alizy/ssh");
+        let e = host_key_failure(Some(&k), Ok(k.clone()), rt);
+        assert_eq!(
+            e,
+            SshError::Other(
+                "host key verification failed although the key matches; check /run/alizy/ssh permissions".into()
+            )
+        );
+        let other = HostKey {
+            key_type: "ecdsa-sha2-nistp256".into(),
+            key_b64: "AAAAE2VjZHNhLXNoYTItbmlzdHAyNTY=".into(),
+        };
+        assert_eq!(
+            host_key_failure(Some(&k), Ok(other.clone()), rt),
+            SshError::HostKeyChanged(other)
+        );
+        assert!(
+            matches!(host_key_failure(Some(&k), Err("timeout".into()), rt), SshError::Other(m) if m.contains("timeout"))
+        );
+    }
+
+    #[test]
+    fn runtime_dir_creates_parents_0755_and_never_touches_existing_ones() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = tempfile::tempdir().unwrap();
+        let existing = base.path().join("existing");
+        std::fs::create_dir(&existing).unwrap();
+        std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let leaf = existing.join("alizy").join("ssh");
+        let (uid, gid) = (nix::unistd::getuid().as_raw(), nix::unistd::getgid().as_raw());
+        ensure_runtime_dir(&leaf, uid, gid).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode(&existing), 0o700);
+        assert_eq!(mode(&existing.join("alizy")), 0o755);
+        assert_eq!(mode(&leaf), 0o750);
+        // Idempotent; an existing leaf is forced back to 0750, its parent left alone.
+        std::fs::set_permissions(&leaf, std::fs::Permissions::from_mode(0o777)).unwrap();
+        std::fs::set_permissions(existing.join("alizy"), std::fs::Permissions::from_mode(0o711)).unwrap();
+        ensure_runtime_dir(&leaf, uid, gid).unwrap();
+        assert_eq!(mode(&leaf), 0o750);
+        assert_eq!(mode(&existing.join("alizy")), 0o711);
+    }
+
+    #[tokio::test]
+    async fn ssh_exit_kills_tun2socks_promptly() {
+        let me = (nix::unistd::getuid().as_raw(), nix::unistd::getgid().as_raw());
+        let dir = tempfile::tempdir().unwrap();
+        let spawn = |exe: &str, args: &[&str]| {
+            let a: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+            unprivileged_command(&alizy_core::sysprobe::find_exe(exe).unwrap(), &a, me, dir.path(), &[])
+                .spawn()
+                .unwrap()
+        };
+        let ssh = spawn("true", &[]);
+        let tun2socks = spawn("sleep", &["30"]);
+        let dns = DnsForwarder::start(
+            "127.0.0.1:0".parse().unwrap(),
+            "127.0.0.1:9".parse().unwrap(),
+            vec!["192.0.2.53".parse().unwrap()],
+        )
+        .await
+        .unwrap();
+        let mut t = SshTunnel {
+            ssh,
+            tun2socks,
+            dns,
+            askpass: None,
+            endpoint: "203.0.113.5:22".parse().unwrap(),
+            ssh_err: TailBuf::new(64),
+            t2s_err: TailBuf::new(64),
+            known_hosts: dir.path().join("x.known_hosts"),
+            alive_at: 0,
+        };
+        let mut why = None;
+        for _ in 0..100 {
+            why = t.try_exited();
+            if why.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(why.unwrap().starts_with("ssh exited"));
+        // tun2socks must not keep dialling a SOCKS port nobody owns any more.
+        let st = tokio::time::timeout(Duration::from_secs(2), t.tun2socks.wait())
+            .await
+            .expect("tun2socks killed")
+            .unwrap();
+        assert!(!st.success());
+        t.stop().await;
     }
 
     #[test]

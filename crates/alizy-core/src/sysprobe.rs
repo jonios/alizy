@@ -284,7 +284,7 @@ pub fn openssh_version_ok(ssh_v_output: &str) -> bool {
 }
 
 /// Pure SSH dependency check. `ssh_v` is the `ssh -V` output when it could be obtained.
-fn compute_ssh_missing(has_exe: impl Fn(&str) -> bool, ssh_v: Option<&str>) -> Vec<Dependency> {
+pub fn compute_ssh_missing(has_exe: impl Fn(&str) -> bool, ssh_v: Option<&str>) -> Vec<Dependency> {
     let mut missing = Vec::new();
     let openssh_ok = has_exe("ssh") && has_exe("ssh-keyscan") && ssh_v.map(openssh_version_ok).unwrap_or(false);
     if !openssh_ok {
@@ -294,12 +294,6 @@ fn compute_ssh_missing(has_exe: impl Fn(&str) -> bool, ssh_v: Option<&str>) -> V
         missing.push(Dependency::Tun2Socks);
     }
     missing
-}
-
-/// SSH dependencies missing right now (same rules as [`probe`]).
-pub fn ssh_missing() -> Vec<Dependency> {
-    let ssh_v = find_exe("ssh").and_then(|p| ssh_version_output(&p));
-    compute_ssh_missing(|e| find_exe(e).is_some(), ssh_v.as_deref())
 }
 
 /// `ssh -V` prints to stderr, e.g. `OpenSSH_9.6p1, OpenSSL 3.0.13`.

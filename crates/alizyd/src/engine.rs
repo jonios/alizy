@@ -50,7 +50,8 @@ pub trait Backend: PlatformAdapter {
     /// Fetch a server's host key, running as `user` (never root).
     async fn keyscan(&self, user: (u32, u32), host: IpAddr, port: u16) -> Result<HostKey, String>;
     /// Missing SSH dependencies (human-readable names); empty when ready.
-    async fn ssh_missing(&self) -> Vec<String>;
+    /// Any version probe runs as `user`, never root.
+    async fn ssh_missing(&self, user: (u32, u32)) -> Vec<String>;
 }
 
 /// Where and as whom SSH tunnels run.
@@ -557,6 +558,19 @@ impl<A: Backend> Engine<A> {
     /// SSH bring-up. The firewall for the new tunnel is enforced first, so
     /// even with the kill switch on, `ssh-keyscan`/`ssh` (as alizy-ssh) reach
     /// the server through the ssh_mark chain and the TCP endpoint exception.
+    ///
+    /// Lock hold: this runs under the engine lock (like WireGuard bring-up).
+    /// Bounded worst case, excluding pathological `ip`/`nft` hangs (each capped
+    /// at 15 s by `exec`), is about 40 s:
+    ///
+    /// - previous-tunnel teardown: about 6 s (two 3 s kill waits);
+    /// - firewall apply and verify;
+    /// - either keyscan (unknown key, at most 10 s) or SOCKS readiness (at
+    ///   most 20 s plus one 2 s probe), plus a re-keyscan of at most 10 s
+    ///   when ssh reports a host-key failure;
+    /// - the 0.3 s tun2socks start check.
+    ///
+    /// Status reads use the watch channel and are not blocked; other commands wait.
     async fn bring_up_ssh(
         &self,
         inner: &mut Inner,
@@ -654,10 +668,10 @@ impl<A: Backend> Engine<A> {
             }
         }
         if spec.ssh.is_some() {
-            if self.ssh.user.is_none() {
+            let Some(user) = self.ssh.user else {
                 return Err(err(ErrorCode::MissingDependency, MISSING_SSH_USER));
-            }
-            let missing = self.adapter.ssh_missing().await;
+            };
+            let missing = self.adapter.ssh_missing(user).await;
             if !missing.is_empty() {
                 return Err(err(
                     ErrorCode::MissingDependency,
@@ -1489,7 +1503,7 @@ mod tests {
             self.with(|s| s.log.push("keyscan".into()));
             Ok(host_key())
         }
-        async fn ssh_missing(&self) -> Vec<String> {
+        async fn ssh_missing(&self, _user: (u32, u32)) -> Vec<String> {
             Vec::new()
         }
     }
