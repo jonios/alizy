@@ -95,7 +95,7 @@ impl SshPublic {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SshConfig {
     pub public: SshPublic,
     pub password: Zeroizing<String>,

@@ -401,6 +401,7 @@ pub async fn connect_profile(st: &AppState, id: &str) -> R<()> {
         profile_name: row.name.clone(),
         config,
         cached_endpoints: row.cached_endpoints.clone(),
+        ssh: None,
     };
     st.log("info", "connection", format!("Connecting to \"{}\"…", row.name))
         .await;

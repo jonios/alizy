@@ -142,6 +142,7 @@ async fn main() {
                     profile_name: row.name,
                     config,
                     cached_endpoints: row.cached_endpoints,
+                    ssh: None,
                 };
                 print(&call(Command::Connect { spec: Box::new(spec) }).await?);
                 Ok(())

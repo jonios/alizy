@@ -86,6 +86,7 @@ impl Engine {
                 .dns_backend()
                 .unwrap_or(alizy_core::sysprobe::DnsBackend::ResolvConfFile),
             daemon_started: now(),
+            tunnel_kind: None,
         };
         let (status_tx, _) = watch::channel(initial);
         let engine = Arc::new(Self {
@@ -195,6 +196,7 @@ impl Engine {
                 .dns_backend()
                 .unwrap_or(alizy_core::sysprobe::DnsBackend::ResolvConfFile),
             daemon_started: self.started_at,
+            tunnel_kind: None,
         };
         self.status_tx.send_replace(s);
     }

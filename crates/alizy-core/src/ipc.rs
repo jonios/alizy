@@ -4,6 +4,7 @@
 
 use crate::config::{PublicConfig, WgConfig};
 use crate::firewall::NetworkPolicy;
+use crate::ssh::{HostKey, SshConfig};
 use crate::state::ConnectionState;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -20,6 +21,9 @@ pub struct TunnelSpec {
     /// Last known resolved endpoint per peer (used when DNS is blocked).
     #[serde(default)]
     pub cached_endpoints: Vec<Option<SocketAddr>>,
+    /// SSH-tunnel profile; when `Some`, `config` is ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh: Option<SshConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +77,10 @@ pub enum ErrorCode {
     Busy,
     Unsupported,
     Internal,
+    HostKeyUnknown,
+    HostKeyChanged,
+    AuthFailed,
+    MissingDependency,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
@@ -80,6 +88,9 @@ pub enum ErrorCode {
 pub struct IpcError {
     pub code: ErrorCode,
     pub message: String,
+    /// Set for `HostKeyUnknown` / `HostKeyChanged`: the key the server presented.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_key: Option<HostKey>,
 }
 
 impl IpcError {
@@ -87,6 +98,7 @@ impl IpcError {
         Self {
             code,
             message: message.into(),
+            host_key: None,
         }
     }
 }
@@ -127,6 +139,9 @@ pub struct DaemonStatus {
     /// to detect a service restart (upgrade, crash recovery).
     #[serde(default)]
     pub daemon_started: u64,
+    /// `"ssh"` for SSH tunnels; absent for WireGuard.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -249,4 +264,93 @@ pub struct RouteTest {
     pub cnames: Vec<String>,
     pub entries: Vec<RouteTestEntry>,
     pub error: Option<String>,
+}
+
+#[cfg(test)]
+mod ssh_ipc_tests {
+    use super::*;
+    use crate::ssh::{HostKey, SshConfig, SshPublic};
+
+    const GOLD_CONNECT: &str = r#"{"cmd":"connect","spec":{"profile_id":"p1","profile_name":"Home","config":{"interface":{"private_key":"dwdtCnMYpX08FsFyUbJmRd9ML4frwJkqsXf7pR25LCo=","addresses":["10.66.0.2/32","fd00:66::2/128"],"dns":["10.66.0.1"],"dns_search":["corp.example"],"mtu":1420,"listen_port":null},"peers":[{"public_key":"3p7bfXt9wbTTW2HC7OQ1Nz+DQ8hbeGdNrfx+FG+IK08=","preshared_key":"XDnhSwHmuXzMhW9ffSo/KQPg8f8ihQ0p0AeHPd5L6kI=","allowed_ips":["0.0.0.0/0","::/0"],"endpoint":{"host":{"kind":"name","value":"vpn.example.com"},"port":51820},"persistent_keepalive":25}]},"cached_endpoints":[null]}}"#;
+    const GOLD_ERR: &str = r#"{"code":"tunnel","message":"boom"}"#;
+
+    fn wg_spec() -> TunnelSpec {
+        let cfg = crate::config::parse(&crate::config::tests::sample()).unwrap().config;
+        TunnelSpec {
+            profile_id: "p1".into(),
+            profile_name: "Home".into(),
+            config: cfg,
+            cached_endpoints: vec![None],
+            ssh: None,
+        }
+    }
+
+    #[test]
+    fn wg_connect_json_unchanged() {
+        let c = Command::Connect {
+            spec: Box::new(wg_spec()),
+        };
+        assert_eq!(serde_json::to_string(&c).unwrap(), GOLD_CONNECT);
+        let back: Command = serde_json::from_str(GOLD_CONNECT).unwrap();
+        assert!(matches!(back, Command::Connect { spec } if spec.ssh.is_none()));
+    }
+
+    #[test]
+    fn ipc_error_without_host_key_json_unchanged() {
+        let e = IpcError::new(ErrorCode::Tunnel, "boom");
+        assert_eq!(serde_json::to_string(&e).unwrap(), GOLD_ERR);
+        let back: IpcError = serde_json::from_str(GOLD_ERR).unwrap();
+        assert!(back.host_key.is_none());
+    }
+
+    #[test]
+    fn ssh_spec_roundtrips() {
+        let mut spec = wg_spec();
+        spec.config = crate::config::WgConfig::placeholder();
+        spec.ssh = Some(SshConfig {
+            public: SshPublic {
+                host: "203.0.113.5".parse().unwrap(),
+                port: 22,
+                username: "alice".into(),
+                host_key: None,
+                dns: vec![],
+            },
+            password: zeroize::Zeroizing::new("hunter2".into()),
+        });
+        let s = serde_json::to_string(&Command::Connect { spec: Box::new(spec) }).unwrap();
+        let back: Command = serde_json::from_str(&s).unwrap();
+        let Command::Connect { spec } = back else { panic!() };
+        let ssh = spec.ssh.unwrap();
+        assert_eq!(ssh.public.username, "alice");
+        assert_eq!(&*ssh.password, "hunter2");
+        assert!(!format!("{ssh:?}").contains("hunter2"));
+    }
+
+    #[test]
+    fn host_key_error_roundtrips() {
+        let mut e = IpcError::new(ErrorCode::HostKeyUnknown, "unknown");
+        e.host_key = Some(HostKey {
+            key_type: "ssh-ed25519".into(),
+            key_b64: "AAAA".into(),
+        });
+        let s = serde_json::to_string(&e).unwrap();
+        assert!(s.contains(r#""code":"host_key_unknown""#));
+        let back: IpcError = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.host_key, e.host_key);
+        for c in [
+            ErrorCode::HostKeyChanged,
+            ErrorCode::AuthFailed,
+            ErrorCode::MissingDependency,
+        ] {
+            let j = serde_json::to_string(&c).unwrap();
+            assert_eq!(serde_json::from_str::<ErrorCode>(&j).unwrap(), c);
+        }
+    }
+
+    #[test]
+    fn placeholder_splits_and_is_not_real() {
+        let p = crate::config::WgConfig::placeholder();
+        assert!(p.peers.is_empty());
+        let _ = p.split();
+    }
 }
