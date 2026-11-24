@@ -2,6 +2,7 @@
 
 mod commands;
 mod daemon_client;
+mod ping;
 mod poller;
 mod state;
 mod tray;
@@ -123,6 +124,7 @@ pub fn run() {
             commands::status,
             commands::quit_ui,
             commands::profiles_list,
+            commands::profiles_ping,
             commands::profile_get,
             commands::profile_validate_text,
             commands::profile_import_text,

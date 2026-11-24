@@ -30,6 +30,7 @@ import { useNav } from "../../store/nav";
 import { useProfiles } from "../../store/profiles";
 import { toast } from "../../store/toast";
 import { DeleteProfileDialog, ExportDialog, RenameDialog } from "./dialogs";
+import { PingBadge } from "./PingBadge";
 
 export function ProfileRow({ p, now }: { p: ProfileSummary; now: number }) {
   const status = useStatus((s) => s.status);
@@ -98,6 +99,7 @@ export function ProfileRow({ p, now }: { p: ProfileSummary; now: number }) {
         </div>
         <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs text-faint">
           <span className="font-mono">{p.endpoint ?? "no endpoint"}</span>
+          {p.endpoint && <PingBadge id={p.id} />}
           <span className="flex items-center gap-1">
             {p.has_ipv4 && <Badge tone="neutral">IPv4</Badge>}
             {p.has_ipv6 && <Badge tone="neutral">IPv6</Badge>}

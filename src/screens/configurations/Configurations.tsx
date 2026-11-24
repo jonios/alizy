@@ -1,4 +1,5 @@
 import {
+  Activity,
   ArchiveRestore,
   ChevronDown,
   ClipboardPaste,
@@ -13,7 +14,7 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ScreenBody, ScreenHeader } from "../../components/ScreenHeader";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
@@ -34,6 +35,7 @@ import { cn } from "../../lib/utils";
 import { plural } from "../../lib/format";
 import { useProfiles } from "../../store/profiles";
 import { useImportReport } from "../../store/importReport";
+import { usePing } from "../../store/ping";
 import { ProfileRow } from "./ProfileRow";
 import { PasteConfigDialog } from "./PasteConfigDialog";
 import { BackupDialog, importFiles, importFolder, restoreBackup } from "./dialogs";
@@ -45,6 +47,8 @@ const NONE = "__none";
 export function Configurations() {
   const { profiles, loaded, loading, error, load } = useProfiles();
   const importing = useImportReport((s) => s.busy);
+  const pinging = usePing((s) => s.busy);
+  const pingAll = usePing((s) => s.pingAll);
   const now = useNow(30_000);
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState(ALL);
@@ -52,6 +56,12 @@ export function Configurations() {
   const [sort, setSort] = useState<Sort>("last_used");
   const [pasteOpen, setPasteOpen] = useState(false);
   const [backupOpen, setBackupOpen] = useState(false);
+
+  // Measure every endpoint as soon as the list is known — also after imports,
+  // which is the only way new profiles ever get a first ping.
+  useEffect(() => {
+    if (loaded && profiles.length > 0) void pingAll();
+  }, [loaded, profiles.length, pingAll]);
 
   const categories = useMemo(() => {
     const set = new Set<string>();
@@ -90,6 +100,18 @@ export function Configurations() {
         description={loaded ? `${plural(profiles.length, "profile")} · drag .conf files anywhere onto the window to import` : "WireGuard profiles"}
         actions={
           <>
+            <Tooltip content="Re-measure the ping of every profile">
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => void pingAll()}
+                loading={pinging}
+                disabled={profiles.length === 0}
+                aria-label="Re-measure pings"
+              >
+                {!pinging && <Activity />} Ping
+              </Button>
+            </Tooltip>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button variant="ghost" size="sm" aria-label="Backup and restore">

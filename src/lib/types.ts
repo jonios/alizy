@@ -108,6 +108,17 @@ export interface ImportReport {
   warnings: { source: string; messages: string[] }[];
 }
 
+/** Result of one ICMP probe of a profile's endpoint host. */
+export interface PingResult {
+  profile_id: string;
+  /** endpoint host exactly as configured */
+  host: string;
+  /** round-trip time in ms (≥ 1), null when the probe failed */
+  latency_ms: number | null;
+  /** reason when latency_ms is null: "timeout", "blocked", "unreachable", … */
+  error: string | null;
+}
+
 export interface ValidationResult {
   ok: boolean;
   error: string | null;

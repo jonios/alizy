@@ -42,6 +42,12 @@ pub struct ProfileSummary {
     fingerprint: String,
 }
 
+/// Endpoint of the first peer that has one — the address the UI shows and
+/// the address the ping column measures.
+fn first_endpoint(cfg: &alizy_core::PublicConfig) -> Option<&alizy_core::config::Endpoint> {
+    cfg.peers.iter().find_map(|p| p.endpoint.as_ref())
+}
+
 impl From<&ProfileRow> for ProfileSummary {
     fn from(r: &ProfileRow) -> Self {
         let fam = r.config.tunnel_families();
@@ -50,11 +56,7 @@ impl From<&ProfileRow> for ProfileSummary {
             name: r.name.clone(),
             category: r.category.clone(),
             favorite: r.favorite,
-            endpoint: r
-                .config
-                .peers
-                .iter()
-                .find_map(|p| p.endpoint.as_ref().map(|e| e.to_string())),
+            endpoint: first_endpoint(&r.config).map(ToString::to_string),
             addresses: r.config.addresses.iter().map(ToString::to_string).collect(),
             has_ipv4: fam.ipv4,
             has_ipv6: fam.ipv6,
@@ -211,6 +213,24 @@ pub async fn profiles_list(st: S<'_>) -> R<Vec<ProfileSummary>> {
         .iter()
         .map(ProfileSummary::from)
         .collect())
+}
+
+/// ICMP-echo every profile's endpoint host and report the round trip.
+/// Profiles sharing a host are probed once; results are not stored anywhere.
+#[tauri::command]
+pub async fn profiles_ping(st: S<'_>) -> R<Vec<crate::ping::PingResult>> {
+    let rows = st.profiles.db.list_profiles().await.map_err(e)?;
+    let targets: Vec<(String, String)> = rows
+        .iter()
+        .filter_map(|r| {
+            let host = match &first_endpoint(&r.config)?.host {
+                alizy_core::config::Host::Ip(ip) => ip.to_string(),
+                alizy_core::config::Host::Name(name) => name.clone(),
+            };
+            Some((r.id.clone(), host))
+        })
+        .collect();
+    Ok(crate::ping::ping_all(targets).await)
 }
 
 #[derive(Serialize)]

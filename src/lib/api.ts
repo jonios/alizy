@@ -11,6 +11,7 @@ import type {
   LogEntry,
   LogQuery,
   NetworkPolicy,
+  PingResult,
   ProfileDetail,
   ProfileSummary,
   RouteTest,
@@ -29,6 +30,8 @@ export const api = {
 
   // profiles
   profilesList: () => invoke<ProfileSummary[]>("profiles_list"),
+  /** ICMP-echo every profile endpoint; resolves when all probes finished. */
+  profilesPing: () => invoke<PingResult[]>("profiles_ping"),
   profileGet: (id: string) => invoke<ProfileDetail>("profile_get", { id }),
   validateText: (text: string) => invoke<ValidationResult>("profile_validate_text", { text }),
   importText: (text: string, name: string | null) => invoke<ImportReport>("profile_import_text", { text, name }),

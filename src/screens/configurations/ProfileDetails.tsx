@@ -31,10 +31,12 @@ import { STATE_LABEL, STATE_TONE, TONE_BG, TONE_TEXT, isBusyState } from "../../
 import { cn, errMsg } from "../../lib/utils";
 import { useNav } from "../../store/nav";
 import { useProfiles } from "../../store/profiles";
+import { usePing } from "../../store/ping";
 import { useStatus } from "../../store/status";
 import { toast } from "../../store/toast";
 import { DeleteProfileDialog, ExportDialog } from "./dialogs";
 import { EditConfigDialog } from "./EditConfigDialog";
+import { PingBadge } from "./PingBadge";
 import { RevealKey } from "./RevealKey";
 
 export function ProfileDetailsSheet() {
@@ -95,6 +97,13 @@ function ProfileDetails({ id, onClose }: { id: string; onClose: () => void }) {
   useEffect(() => {
     void loadHistory();
   }, [loadHistory]);
+
+  // A quick-switcher deep link opens this sheet before the list ever ran a
+  // probe, so measure once here if this profile has no result yet.
+  const knownPing = usePing((st) => st.results[id]);
+  useEffect(() => {
+    if (!knownPing && !usePing.getState().busy) void usePing.getState().pingAll();
+  }, [id, knownPing]);
 
   if (error && !detail) {
     return (
@@ -415,6 +424,7 @@ function HeaderBlock({ detail, onChanged, categories }: { detail: ProfileDetail;
           )}
           <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted">
             <span className="selectable font-mono">{s.endpoint ?? "no endpoint"}</span>
+            {s.endpoint && <PingBadge id={s.id} />}
             {tone && status && (
               <span className={cn("inline-flex items-center gap-1.5 font-medium", TONE_TEXT[tone])}>
                 <Dot className={TONE_BG[tone]} pulse={isBusyState(status.state)} />
