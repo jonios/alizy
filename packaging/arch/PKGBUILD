@@ -4,7 +4,7 @@
 pkgbase=alizy
 pkgname=(alizyd alizy)
 pkgver=0.1.0
-pkgrel=6
+pkgrel=8
 pkgdesc="WireGuard desktop client with an OS-level nftables kill switch"
 arch=('x86_64' 'aarch64')
 url="https://github.com/alizy/alizy"
