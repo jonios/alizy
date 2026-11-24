@@ -59,9 +59,10 @@ close-to-tray, single instance, autostart, root refusal. React UI: see below.
 ## M8 — Packaging
 systemd unit (hardened, before network-pre), sysusers, polkit action, desktop
 file, install/uninstall scripts, Arch split PKGBUILD, RPM spec (Fedora +
-openSUSE), deb build script, Tauri bundles for the GUI (DEB/RPM/AppImage untested;
-only the Arch package was installed and validated). Static validation:
-`systemd-analyze verify` clean, polkit XML valid, scripts parse.
+openSUSE), deb build script, Tauri bundles for the GUI (DEB/RPM untested; the
+AppImage was extracted and launched on a real system; only the Arch package was
+installed and validated). Static validation: `systemd-analyze verify` clean,
+polkit XML valid, scripts parse.
 
 ## Real-system validation (2026-11-19/20)
 Installed Arch package on the development machine, upgraded 0.1.0-1 → 0.1.0-5.

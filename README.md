@@ -75,8 +75,10 @@ Bundles: `npx tauri build --bundles deb,rpm,appimage` (GUI) ·
 `packaging/rpm/alizyd.spec` (Fedora/openSUSE) · `packaging/deb/build-alizyd-deb.sh`.
 The privileged service is always a separate package from the GUI.
 **Only the Arch package has been installed and validated on a real system** (see
-[docs/REAL_SYSTEM_VALIDATION.md](docs/REAL_SYSTEM_VALIDATION.md)); the DEB, RPM and
-AppImage outputs are untested.
+[docs/REAL_SYSTEM_VALIDATION.md](docs/REAL_SYSTEM_VALIDATION.md)); the AppImage
+launches and connects to the running daemon, while the DEB and RPM outputs are
+untested. The AppImage ships the GUI only: the privileged `alizyd` service still
+has to be installed separately (see [Install](#install)).
 
 ## Install
 
