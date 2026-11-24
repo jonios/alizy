@@ -4,10 +4,20 @@ post_install() {
   echo ">>> Allow your user to use it: sudo usermod -aG alizy \$USER"
   echo ">>> Then REBOOT (a re-login is not enough when the systemd user manager"
   echo ">>> lingers, e.g. loginctl enable-linger / uwsm sessions)."
+  echo ">>> Kill switch blocking the network?  sudo alizyd --remove-firewall"
 }
 post_upgrade() {
   systemctl daemon-reload
   systemctl try-restart alizyd.service
+  # An upgrade must never leave the machine with a half-applied kill switch
+  # and nothing able to manage it: if the new daemon did not come up, drop
+  # the rules it may have left behind rather than black-hole the network.
+  if ! systemctl -q is-active alizyd.service; then
+    /usr/bin/alizyd --remove-firewall 2>/dev/null || true
+    echo ">>> alizyd did not come back after the upgrade, so its nftables rules"
+    echo ">>> were removed and the network stays reachable. Bring it back with:"
+    echo ">>>     sudo systemctl enable --now alizyd"
+  fi
 }
 pre_remove() {
   systemctl disable --now alizyd.service 2>/dev/null || true
