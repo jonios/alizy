@@ -6,7 +6,7 @@ import { Skeleton } from "../../components/ui/skeleton";
 import { EmptyState } from "../../components/ui/empty-state";
 import { Dot } from "../../components/ui/badge";
 import type { ProfileSummary } from "../../lib/types";
-import { relativeTime } from "../../lib/format";
+import { endpointLabel, relativeTime } from "../../lib/format";
 import { cn } from "../../lib/utils";
 import { useProfiles } from "../../store/profiles";
 import { useStatus } from "../../store/status";
@@ -95,7 +95,7 @@ export function QuickSwitcher({ disabled }: { disabled: boolean }) {
                         {tone && <Dot className={TONE_BG[tone]} pulse={status ? isBusyState(status.state) : false} />}
                       </div>
                       <div className="truncate text-xs text-faint">
-                        {p.endpoint ?? "No endpoint"} · {p.last_connected_at ? relativeTime(p.last_connected_at) : "never used"}
+                        {endpointLabel(p) ?? "No endpoint"} · {p.last_connected_at ? relativeTime(p.last_connected_at) : "never used"}
                       </div>
                     </div>
                   </button>

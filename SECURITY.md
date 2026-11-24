@@ -16,6 +16,12 @@
 | Unauthorised local users controlling the VPN | socket is `0660 root:alizy`; daemon checks `SO_PEERCRED` and authorises the peer PID with polkit (`io.alizy.daemon.control`) |
 | Private-key disclosure | keys are `Zeroizing`, `Debug` prints `[redacted]`, never logged, never in SQLite; stored in the OS keyring (or a 0600 file fallback, clearly reported in the UI) |
 | GUI running as root | the GUI refuses to start with euid 0 |
+| SSH password disclosure | stored like private keys (OS keyring, or the 0600 file fallback), never in SQLite, argv, the environment, logs or backups (restored SSH profiles ask for it again). It reaches ssh only through the one-shot askpass socket below |
+| SSH server impersonation (MITM) | trust on first use: an unknown server's key is fetched with `ssh-keyscan` and shown as a SHA256 fingerprint the user must confirm; it is then pinned (`StrictHostKeyChecking=yes`, a per-connection known_hosts file, no global known_hosts). A changed key aborts the connection with the new fingerprint and is never accepted silently |
+| Local users abusing the SOCKS proxy (`ssh -D`) | the loopback SOCKS port is restricted by nftables `meta skuid` rules (only alizy-ssh and root may connect to it, only alizy-ssh may answer from it); before use the daemon also checks in `/proc/net/tcp(6)` that every listener on the port belongs to alizy-ssh |
+| Privileged SSH tooling | `ssh`, `ssh-keyscan`, `ssh -V` and `badvpn-tun2socks` never run as root: they run as the unprivileged `alizy-ssh` system user (uid and gid set, supplementary groups dropped and re-checked, cleared environment, fixed `PATH`, killed with the daemon) |
+| Password helper hijack | the askpass socket is one-shot, `0600` owned by alizy-ssh, accepts only peers whose `SO_PEERCRED` uid is alizy-ssh and that present the random token issued for that connection attempt; it is unlinked after the first answer or after 60 s |
+| UDP leaking around a TCP-only tunnel | while an SSH profile is up, UDP into the tunnel interface is always rejected (output and forward), so nothing silently falls back; DNS goes through the daemon's DNS-over-TCP forwarder |
 
 ## Firewall ownership model
 
@@ -37,7 +43,8 @@
 
 * Enabled + no tunnel ⇒ **Protected**: only loopback, DHCP, IPv6 ND and (optionally) LAN are allowed.
 * Enabled + tunnel ⇒ only the tunnel interface, the WireGuard endpoint
-  (`meta mark` = Alizy fwmark **and** endpoint ip/port) and the above.
+  (`meta mark` = Alizy fwmark **and** endpoint ip/port), or for SSH profiles
+  the SSH server's TCP address:port used by the alizy-ssh user, and the above.
 * If the firewall cannot be confirmed active, connect aborts (fail closed).
 * Disabling the kill switch is an explicit, authorised IPC command.
 
@@ -51,6 +58,11 @@
 * The secret-file fallback is plaintext on disk with 0600 permissions; it is
   only used when no Secret Service is reachable, and the UI says so.
 * Leak tests require root; see `tests/leak/README.md`.
+* SSH bring-up (keyscan, waiting for ssh to authenticate) runs under the
+  daemon's engine lock. Disconnect and connect cancel it within about a second,
+  but the 2 s firewall re-verification tick pauses for the length of the
+  attempt (up to about 40 s). The firewall is applied and verified before the
+  slow steps start and stays in place throughout.
 
 ## Reporting
 

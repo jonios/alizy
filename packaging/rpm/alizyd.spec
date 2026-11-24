@@ -16,6 +16,7 @@ Requires:       iproute2
 Requires:       iproute
 %endif
 Recommends:     openresolv
+Recommends:     openssh-clients badvpn
 %{?systemd_requires}
 
 %description

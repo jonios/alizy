@@ -5,6 +5,6 @@ pub mod db;
 pub mod manager;
 pub mod secrets;
 
-pub use db::{Db, DbError, EventFilter, EventRow, HistoryRow, ProfileRow};
+pub use db::{Db, DbError, EventFilter, EventRow, HistoryRow, ProfileKind, ProfileRow};
 pub use manager::{ImportReport, ManagerError, ProfileManager};
 pub use secrets::{Backend as SecretBackend, SecretStore};

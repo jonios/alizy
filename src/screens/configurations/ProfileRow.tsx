@@ -21,7 +21,7 @@ import {
 } from "../../components/ui/dropdown-menu";
 import { Tooltip } from "../../components/ui/tooltip";
 import { STATE_LABEL, STATE_TONE, TONE_BG, TONE_TEXT, isBusyState } from "../../lib/constants";
-import { relativeTime } from "../../lib/format";
+import { endpointLabel, relativeTime } from "../../lib/format";
 import type { ProfileSummary } from "../../lib/types";
 import { api } from "../../lib/api";
 import { cn } from "../../lib/utils";
@@ -31,6 +31,7 @@ import { useProfiles } from "../../store/profiles";
 import { toast } from "../../store/toast";
 import { DeleteProfileDialog, ExportDialog, RenameDialog } from "./dialogs";
 import { PingBadge } from "./PingBadge";
+import { SshProfileDialog } from "./SshProfileDialog";
 
 export function ProfileRow({ p, now }: { p: ProfileSummary; now: number }) {
   const status = useStatus((s) => s.status);
@@ -39,7 +40,8 @@ export function ProfileRow({ p, now }: { p: ProfileSummary; now: number }) {
   const connect = useStatus((s) => s.connect);
   const disconnect = useStatus((s) => s.disconnect);
   const openDetails = useNav((s) => s.openDetails);
-  const [dialog, setDialog] = useState<"rename" | "export" | "delete" | null>(null);
+  const [dialog, setDialog] = useState<"rename" | "export" | "delete" | "ssh" | null>(null);
+  const isSsh = p.kind === "ssh";
 
   const isActive = !!status && status.profile_id === p.id && status.state !== "disconnected";
   const tone = isActive && status ? STATE_TONE[status.state] : null;
@@ -98,13 +100,20 @@ export function ProfileRow({ p, now }: { p: ProfileSummary; now: number }) {
           {p.category && <Badge tone="outline">{p.category}</Badge>}
         </div>
         <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs text-faint">
-          <span className="font-mono">{p.endpoint ?? "no endpoint"}</span>
-          {p.endpoint && <PingBadge id={p.id} />}
-          <span className="flex items-center gap-1">
-            {p.has_ipv4 && <Badge tone="neutral">IPv4</Badge>}
-            {p.has_ipv6 && <Badge tone="neutral">IPv6</Badge>}
-            {p.full_tunnel ? <Badge tone="primary">Full tunnel</Badge> : <Badge tone="outline">Partial routes</Badge>}
-          </span>
+          <span className="font-mono">{endpointLabel(p) ?? "no endpoint"}</span>
+          {(p.endpoint || p.ssh) && <PingBadge id={p.id} />}
+          {isSsh ? (
+            <span className="flex items-center gap-1">
+              <Badge tone="primary">SSH</Badge>
+              {p.password_needed && <Badge tone="warning">Password needed</Badge>}
+            </span>
+          ) : (
+            <span className="flex items-center gap-1">
+              {p.has_ipv4 && <Badge tone="neutral">IPv4</Badge>}
+              {p.has_ipv6 && <Badge tone="neutral">IPv6</Badge>}
+              {p.full_tunnel ? <Badge tone="primary">Full tunnel</Badge> : <Badge tone="outline">Partial routes</Badge>}
+            </span>
+          )}
           <span>Last used {relativeTime(p.last_connected_at, now)}</span>
         </div>
       </button>
@@ -145,9 +154,15 @@ export function ProfileRow({ p, now }: { p: ProfileSummary; now: number }) {
             <DropdownMenuItem onSelect={duplicate}>
               <CopyPlus /> Duplicate
             </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => setDialog("export")}>
-              <Download /> Export…
-            </DropdownMenuItem>
+            {isSsh ? (
+              <DropdownMenuItem onSelect={() => setDialog("ssh")}>
+                <Pencil /> Edit connection…
+              </DropdownMenuItem>
+            ) : (
+              <DropdownMenuItem onSelect={() => setDialog("export")}>
+                <Download /> Export…
+              </DropdownMenuItem>
+            )}
             <DropdownMenuSeparator />
             <DropdownMenuItem destructive onSelect={() => setDialog("delete")}>
               <Trash2 /> Delete…
@@ -157,7 +172,11 @@ export function ProfileRow({ p, now }: { p: ProfileSummary; now: number }) {
       </div>
 
       <RenameDialog open={dialog === "rename"} onOpenChange={(o) => !o && setDialog(null)} id={p.id} current={p.name} />
-      <ExportDialog open={dialog === "export"} onOpenChange={(o) => !o && setDialog(null)} id={p.id} name={p.name} />
+      {isSsh ? (
+        <SshProfileDialog open={dialog === "ssh"} onOpenChange={(o) => !o && setDialog(null)} profile={p} />
+      ) : (
+        <ExportDialog open={dialog === "export"} onOpenChange={(o) => !o && setDialog(null)} id={p.id} name={p.name} />
+      )}
       <DeleteProfileDialog open={dialog === "delete"} onOpenChange={(o) => !o && setDialog(null)} id={p.id} name={p.name} />
     </div>
   );

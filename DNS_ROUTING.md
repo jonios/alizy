@@ -11,6 +11,19 @@
 Custom DNS servers (Network Settings) override the profile's `DNS=`; servers of
 a disabled address family are dropped.
 
+## SSH profiles
+
+An SSH tunnel carries only TCP, so the system resolver is pointed at a
+forwarder inside the daemon on `127.77.0.1:53` (UDP and TCP; `~.` routing on
+systemd-resolved). It relays every query as DNS-over-TCP through ssh's SOCKS
+proxy, so lookups are resolved from the SSH server's side. Upstreams: Custom
+DNS servers, else the profile's DNS, else 1.1.1.1 and 9.9.9.9. Custom DNS
+servers on the local network (private, link-local, loopback, ULA) can't be
+reached from the server and are ignored with a warning in the log. Oversized
+UDP answers are truncated (TC bit) so clients retry over TCP. If another DNS
+service (e.g. dnsmasq on `0.0.0.0:53`) already holds port 53 on `127.77.0.1`,
+SSH connections fail with a message saying so.
+
 ## Leak protection (independent of the backend)
 
 While a tunnel is up and DNS leak protection is on, nftables rejects

@@ -45,6 +45,23 @@ async fn call(cmd: Command) -> Result<Payload, String> {
     r.result.map_err(|e| format!("{:?}: {}", e.code, e.message))
 }
 
+/// Like `call`, but returns the daemon's raw JSON response line (errors included).
+async fn call_raw(cmd: Command) -> Result<String, String> {
+    let path = std::env::var("ALIZY_SOCKET").unwrap_or_else(|_| SOCKET_PATH.into());
+    let mut s = UnixStream::connect(&path)
+        .await
+        .map_err(|e| format!("connect {path}: {e}"))?;
+    let mut line = Zeroizing::new(serde_json::to_vec(&Request { id: 1, command: cmd }).map_err(|e| e.to_string())?);
+    line.push(b'\n');
+    s.write_all(&line).await.map_err(|e| e.to_string())?;
+    let mut buf = String::new();
+    BufReader::new(s).read_line(&mut buf).await.map_err(|e| e.to_string())?;
+    if buf.is_empty() {
+        return Err("connection closed by daemon (not authorised?)".into());
+    }
+    Ok(buf.trim_end().to_string())
+}
+
 fn print(p: &Payload) {
     println!("{}", serde_json::to_string_pretty(p).unwrap());
 }
@@ -142,8 +159,41 @@ async fn main() {
                     profile_name: row.name,
                     config,
                     cached_endpoints: row.cached_endpoints,
+                    ssh: None,
                 };
                 print(&call(Command::Connect { spec: Box::new(spec) }).await?);
+                Ok(())
+            }
+            // ssh-connect <host> <port> <user> [<key_type> <key_b64>] — password read from stdin.
+            // Talks to the daemon directly (no GUI database); prints the raw response so a
+            // host_key_unknown error shows the key to pin on the next call.
+            "ssh-connect" => {
+                let mut pw = Zeroizing::new(String::new());
+                std::io::stdin().read_line(&mut pw).map_err(|e| e.to_string())?;
+                let password = Zeroizing::new(pw.trim_end_matches(['\r', '\n']).to_string());
+                let host_key = match (args.get(4), args.get(5)) {
+                    (Some(t), Some(k)) => Some(alizy_core::ssh::HostKey {
+                        key_type: t.clone(),
+                        key_b64: k.clone(),
+                    }),
+                    _ => None,
+                };
+                let public = alizy_core::ssh::SshPublic {
+                    host: a(1).parse().map_err(|e| format!("host: {e}"))?,
+                    port: a(2).parse().map_err(|e| format!("port: {e}"))?,
+                    username: a(3),
+                    host_key,
+                    dns: Vec::new(),
+                };
+                let spec = TunnelSpec {
+                    profile_id: "ssh-test".into(),
+                    profile_name: "SSH test".into(),
+                    config: alizy_core::config::WgConfig::placeholder(),
+                    cached_endpoints: Vec::new(),
+                    ssh: Some(alizy_core::ssh::SshConfig { public, password }),
+                };
+                let raw = call_raw(Command::Connect { spec: Box::new(spec) }).await?;
+                println!("{raw}");
                 Ok(())
             }
             "disconnect" => call(Command::Disconnect).await.map(|p| print(&p)),

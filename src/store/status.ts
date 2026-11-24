@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { api } from "../lib/api";
 import type { DaemonStatus, StatusEvent } from "../lib/types";
 import { toast } from "./toast";
+import { isConnectError, useSshFlow } from "./sshFlow";
 
 export interface RatePoint {
   t: number;
@@ -83,7 +84,28 @@ export const useStatus = create<StatusState>((set, get) => ({
     try {
       await api.connect(id);
     } catch (e) {
-      toast.error("Could not connect", e);
+      // The single place connect errors are interpreted (dashboard, quick switcher, rows, details).
+      if (isConnectError(e)) {
+        const flow = useSshFlow.getState();
+        if ((e.code === "host_key_unknown" || e.code === "host_key_changed") && e.host_key && e.fingerprint) {
+          flow.openHostKey({
+            profileId: id,
+            changed: e.code === "host_key_changed",
+            hostKey: e.host_key,
+            fingerprint: e.fingerprint,
+          });
+        } else if (e.code === "password_needed") {
+          flow.openPassword(id);
+        } else if (e.code === "cancelled") {
+          // Superseded by a disconnect or another connect: nothing to report.
+        } else if (e.code === "auth_failed") {
+          toast.error("Could not connect", "Authentication failed: check the username and password.");
+        } else {
+          toast.error("Could not connect", e.message);
+        }
+      } else {
+        toast.error("Could not connect", e);
+      }
     } finally {
       set({ pending: null });
     }

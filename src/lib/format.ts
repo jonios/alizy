@@ -1,3 +1,5 @@
+import type { ProfileSummary } from "./types";
+
 // Formatting helpers. Backend timestamps are unix seconds; toSec() also
 // tolerates millisecond values defensively.
 
@@ -95,4 +97,13 @@ export function shortKey(key: string, head = 8, tail = 5): string {
 
 export function plural(n: number, one: string, many = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`;
+}
+
+/** "user@host:port" for SSH profiles (IPv6 hosts bracketed), else the WireGuard endpoint. */
+export function endpointLabel(p: ProfileSummary): string | null {
+  if (p.kind === "ssh" && p.ssh) {
+    const h = p.ssh.host.includes(":") ? `[${p.ssh.host}]` : p.ssh.host;
+    return `${p.ssh.username}@${h}:${p.ssh.port}`;
+  }
+  return p.endpoint;
 }

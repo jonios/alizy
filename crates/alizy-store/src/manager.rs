@@ -1,12 +1,14 @@
 //! Profile manager: import (text, files, directories, backups), validation,
 //! duplicate detection, editing, duplication, export, deletion.
+//! Also SSH-tunnel profiles, whose password lives only in the secret store.
 //! Independent of Tauri; used by the GUI shell.
 
-use crate::db::{now, Db, DbError, ProfileRow};
+use crate::db::{now, Db, DbError, ProfileKind, ProfileRow};
 use crate::secrets::{SecretError, SecretStore};
 use alizy_core::config::{parse, ProfileSecrets, WgConfig, MAX_CONFIG_BYTES};
 use alizy_core::keys::PublicKey;
 use alizy_core::profile::{fingerprint, name_from_filename, sanitize_name};
+use alizy_core::ssh::{self, HostKey, SshConfig, SshPublic};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -27,6 +29,27 @@ pub enum ManagerError {
     Invalid(String),
     #[error("{0}")]
     Io(String),
+    #[error("this SSH profile needs its password to be entered again")]
+    PasswordNeeded,
+    #[error("{0}")]
+    Unsupported(String),
+}
+
+fn require_wg(row: &ProfileRow) -> Result<(), ManagerError> {
+    match row.kind {
+        ProfileKind::Wireguard => Ok(()),
+        ProfileKind::Ssh => Err(ManagerError::Unsupported(
+            "this is an SSH profile; it has no WireGuard configuration".into(),
+        )),
+    }
+}
+
+fn require_ssh(row: &ProfileRow) -> Result<SshPublic, ManagerError> {
+    match (&row.kind, &row.ssh) {
+        (ProfileKind::Ssh, Some(p)) => Ok(p.clone()),
+        (ProfileKind::Ssh, None) => Err(ManagerError::Invalid("SSH profile has no endpoint data".into())),
+        (ProfileKind::Wireguard, _) => Err(ManagerError::Unsupported("this is not an SSH profile".into())),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -69,7 +92,12 @@ struct BackupProfile {
     name: String,
     category: Option<String>,
     favorite: bool,
+    /// wg-quick text for WireGuard entries; empty for SSH entries.
+    #[serde(default)]
     config: String,
+    /// SSH entries only: the non-secret fields. The password is never backed up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ssh: Option<SshPublic>,
 }
 
 pub struct ProfileManager {
@@ -150,6 +178,9 @@ impl ProfileManager {
             created_at: t,
             updated_at: t,
             last_connected_at: None,
+            kind: ProfileKind::Wireguard,
+            ssh: None,
+            password_needed: false,
         };
         // Secret first; if the DB insert fails, remove the orphaned secret.
         self.secrets.put(&id, &secrets)?;
@@ -285,12 +316,13 @@ impl ProfileManager {
 
     pub async fn full_config(&self, id: &str) -> Result<WgConfig, ManagerError> {
         let row = self.db.get_profile(id).await?;
+        require_wg(&row)?;
         let secrets = self.secrets.get(id)?;
         WgConfig::join(&row.config, &secrets).map_err(|e| ManagerError::Invalid(e.to_string()))
     }
 
     pub async fn reveal_private_key(&self, id: &str) -> Result<Zeroizing<String>, ManagerError> {
-        self.db.get_profile(id).await?;
+        require_wg(&self.db.get_profile(id).await?)?;
         Ok(self.secrets.get(id)?.private_key.expose_base64())
     }
 
@@ -338,6 +370,7 @@ impl ProfileManager {
     /// Edit the configuration text. Returns parser warnings.
     pub async fn update_text(&self, id: &str, text: &str) -> Result<Vec<String>, ManagerError> {
         let row = self.db.get_profile(id).await?;
+        require_wg(&row)?;
         let stored = self.secrets.get(id)?;
         let text = Self::restore_placeholders(text, &stored);
         if text.contains(REDACTED) {
@@ -370,15 +403,34 @@ impl ProfileManager {
     }
 
     /// Intentional copy (same keys). Marked so that import still detects the original.
+    /// SSH copies get the same `~suffix` fingerprint scheme as WireGuard copies.
     pub async fn duplicate(&self, id: &str) -> Result<ProfileRow, ManagerError> {
         let row = self.db.get_profile(id).await?;
-        let cfg = self.full_config(id).await?;
         let fp = format!(
             "{}~{}",
             base_fp(&row.fingerprint),
             &uuid::Uuid::new_v4().simple().to_string()[..8]
         );
-        let mut new = self.store_new(&cfg, &format!("{} copy", row.name), fp).await?;
+        let mut new = match row.kind {
+            ProfileKind::Wireguard => {
+                let cfg = self.full_config(id).await?;
+                self.store_new(&cfg, &format!("{} copy", row.name), fp).await?
+            }
+            ProfileKind::Ssh => {
+                let public = require_ssh(&row)?;
+                let password = if row.password_needed {
+                    None
+                } else {
+                    match self.secrets.get_ssh_password(id) {
+                        Ok(pw) => Some(pw),
+                        Err(SecretError::Missing) => None,
+                        Err(e) => return Err(e.into()),
+                    }
+                };
+                self.store_new_ssh(&format!("{} copy", row.name), public, password, fp)
+                    .await?
+            }
+        };
         if row.category.is_some() {
             self.db.set_category(&new.id, row.category.as_deref()).await?;
             new.category = row.category;
@@ -393,10 +445,15 @@ impl ProfileManager {
     }
 
     pub async fn export(&self, id: &str, path: &Path, include_private: bool) -> Result<(), ManagerError> {
+        let row = self.db.get_profile(id).await?;
+        if row.kind == ProfileKind::Ssh {
+            return Err(ManagerError::Unsupported(
+                "SSH profiles cannot be exported as .conf".into(),
+            ));
+        }
         let text = if include_private {
             self.full_config(id).await?.to_wg_quick(true)
         } else {
-            let row = self.db.get_profile(id).await?;
             // Redacted export does not need secrets from the store.
             redacted_text(&row)
         };
@@ -407,12 +464,17 @@ impl ProfileManager {
         let rows = self.db.list_profiles().await?;
         let mut profiles = Vec::with_capacity(rows.len());
         for r in &rows {
-            let cfg = self.full_config(&r.id).await?;
+            let (config, ssh) = match r.kind {
+                ProfileKind::Wireguard => (self.full_config(&r.id).await?.to_wg_quick(true).to_string(), None),
+                // Never the password: restored SSH profiles ask for it again.
+                ProfileKind::Ssh => (String::new(), Some(require_ssh(r)?)),
+            };
             profiles.push(BackupProfile {
                 name: r.name.clone(),
                 category: r.category.clone(),
                 favorite: r.favorite,
-                config: cfg.to_wg_quick(true).to_string(),
+                config,
+                ssh,
             });
         }
         let b = Backup {
@@ -436,7 +498,10 @@ impl ProfileManager {
         let mut r = ImportReport::default();
         for p in b.profiles {
             let before = r.imported.len();
-            self.import_one(&p.name, &p.config, Some(&p.name), &mut r).await;
+            match p.ssh {
+                Some(public) => self.restore_ssh(&p.name, public, &mut r).await,
+                None => self.import_one(&p.name, &p.config, Some(&p.name), &mut r).await,
+            }
             if r.imported.len() > before {
                 let row = r.imported.last_mut().unwrap();
                 if p.favorite {
@@ -451,10 +516,208 @@ impl ProfileManager {
         }
         Ok(r)
     }
+
+    // ── SSH profiles ──
+
+    /// Insert an SSH row. With `password: None` the row is flagged
+    /// `password_needed` and no secret is written.
+    async fn store_new_ssh(
+        &self,
+        name: &str,
+        public: SshPublic,
+        password: Option<Zeroizing<String>>,
+        fp: String,
+    ) -> Result<ProfileRow, ManagerError> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let t = now();
+        let row = ProfileRow {
+            id: id.clone(),
+            name: self.unique_name(name).await?,
+            category: None,
+            favorite: false,
+            fingerprint: fp,
+            config: WgConfig::placeholder().split().0,
+            cached_endpoints: Vec::new(),
+            created_at: t,
+            updated_at: t,
+            last_connected_at: None,
+            kind: ProfileKind::Ssh,
+            ssh: Some(public),
+            password_needed: password.is_none(),
+        };
+        if let Some(pw) = &password {
+            self.secrets.put_ssh_password(&id, pw)?;
+        }
+        if let Err(e) = self.db.insert_profile(&row).await {
+            let _ = self.secrets.delete(&id);
+            return Err(e.into());
+        }
+        Ok(row)
+    }
+
+    async fn reject_duplicate(&self, fp: &str, exclude: Option<&str>) -> Result<(), ManagerError> {
+        match self.find_duplicate(fp, exclude).await? {
+            Some(d) => Err(ManagerError::Invalid(format!(
+                "this configuration duplicates profile \"{}\"",
+                d.name
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    pub async fn create_ssh(
+        &self,
+        name: &str,
+        public: SshPublic,
+        password: Zeroizing<String>,
+    ) -> Result<ProfileRow, ManagerError> {
+        let name = sanitize_name(name).ok_or_else(|| ManagerError::Invalid("name must not be empty".into()))?;
+        let cfg = SshConfig { public, password };
+        ssh::validate(&cfg).map_err(ManagerError::Invalid)?;
+        let fp = ssh::fingerprint(&cfg.public);
+        self.reject_duplicate(&fp, None).await?;
+        let SshConfig { public, password } = cfg;
+        self.store_new_ssh(&name, public, Some(password), fp).await
+    }
+
+    /// Edit an SSH profile. `password: None` keeps the stored one; `Some`
+    /// replaces it and clears `password_needed`. Moving to another host or
+    /// port drops the pinned host key.
+    pub async fn update_ssh(
+        &self,
+        id: &str,
+        name: &str,
+        mut public: SshPublic,
+        password: Option<Zeroizing<String>>,
+    ) -> Result<ProfileRow, ManagerError> {
+        let row = self.db.get_profile(id).await?;
+        let old = require_ssh(&row)?;
+        let wanted = sanitize_name(name).ok_or_else(|| ManagerError::Invalid("name must not be empty".into()))?;
+        if old.host != public.host || old.port != public.port {
+            public.host_key = None;
+        }
+        let password = match password {
+            Some(password) => {
+                let cfg = SshConfig { public, password };
+                ssh::validate(&cfg).map_err(ManagerError::Invalid)?;
+                public = cfg.public.clone();
+                Some(cfg.password.clone())
+            }
+            None => {
+                ssh::validate_public(&public).map_err(ManagerError::Invalid)?;
+                None
+            }
+        };
+        let fp = ssh::fingerprint(&public);
+        if fp != base_fp(&row.fingerprint) {
+            self.reject_duplicate(&fp, Some(id)).await?;
+        }
+        // keep a "~copy" suffix if this row was an intentional duplicate
+        let fp = match row.fingerprint.split_once('~') {
+            Some((_, suffix)) => format!("{fp}~{suffix}"),
+            None => fp,
+        };
+        let new_name = if wanted.eq_ignore_ascii_case(&row.name) {
+            wanted
+        } else {
+            self.unique_name(&wanted).await?
+        };
+        let password_needed = match &password {
+            Some(pw) => {
+                self.secrets.put_ssh_password(id, pw)?;
+                false
+            }
+            None => row.password_needed,
+        };
+        self.db
+            .update_ssh_profile(id, &new_name, &public, &fp, password_needed)
+            .await?;
+        Ok(self.db.get_profile(id).await?)
+    }
+
+    /// Pin (or with `None`, forget) the server's host key.
+    pub async fn set_ssh_host_key(&self, id: &str, key: Option<HostKey>) -> Result<(), ManagerError> {
+        let row = self.db.get_profile(id).await?;
+        let mut public = require_ssh(&row)?;
+        if let Some(k) = &key {
+            k.validate().map_err(ManagerError::Invalid)?;
+        }
+        public.host_key = key;
+        self.db.set_ssh_public(id, &public).await?;
+        Ok(())
+    }
+
+    /// The SSH profile with its password, for connecting.
+    pub async fn full_ssh_config(&self, id: &str) -> Result<SshConfig, ManagerError> {
+        let row = self.db.get_profile(id).await?;
+        let public = require_ssh(&row)?;
+        if row.password_needed {
+            return Err(ManagerError::PasswordNeeded);
+        }
+        let password = match self.secrets.get_ssh_password(id) {
+            Ok(pw) => pw,
+            Err(SecretError::Missing) => return Err(ManagerError::PasswordNeeded),
+            Err(e) => return Err(e.into()),
+        };
+        Ok(SshConfig { public, password })
+    }
+
+    async fn restore_ssh(&self, source: &str, public: SshPublic, report: &mut ImportReport) {
+        let err = |message: String| SourceError {
+            source: source.into(),
+            message,
+        };
+        if let Err(e) = ssh::validate_public(&public) {
+            report.errors.push(err(e));
+            return;
+        }
+        let fp = ssh::fingerprint(&public);
+        match self.find_duplicate(&fp, None).await {
+            Ok(Some(existing)) => {
+                report.duplicates.push(Duplicate {
+                    source: source.into(),
+                    name: existing.name,
+                    existing_id: existing.id,
+                });
+                return;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                report.errors.push(err(e.to_string()));
+                return;
+            }
+        }
+        let name = sanitize_name(source).unwrap_or_else(|| format!("{}@{}", public.username, public.host));
+        match self.store_new_ssh(&name, public, None, fp).await {
+            Ok(row) => report.imported.push(row),
+            Err(e) => report.errors.push(err(e.to_string())),
+        }
+    }
+}
+
+/// Like [`redacted_text`], but refuses SSH rows (which have no wg-quick text).
+pub fn try_redacted_text(row: &ProfileRow) -> Result<Zeroizing<String>, ManagerError> {
+    require_wg(row)?;
+    Ok(redacted_text(row))
 }
 
 /// wg-quick text from the public projection, secrets shown as `<redacted>`.
+///
+/// SSH rows have no wg-quick text: they get a short comment-only description
+/// (`# SSH profile` / `# user@host:port`) with no secrets. Use
+/// [`try_redacted_text`] to get an error for SSH rows instead.
 pub fn redacted_text(row: &ProfileRow) -> Zeroizing<String> {
+    if row.kind == ProfileKind::Ssh {
+        let mut s = Zeroizing::new(String::from("# SSH profile\n"));
+        if let Some(p) = &row.ssh {
+            let host = match p.host {
+                std::net::IpAddr::V6(h) => format!("[{h}]"),
+                h => h.to_string(),
+            };
+            s.push_str(&format!("# {}@{host}:{}\n", p.username, p.port));
+        }
+        return s;
+    }
     let mut s = Zeroizing::new(String::from("[Interface]\nPrivateKey = <redacted>\n"));
     let c = &row.config;
     let join = |v: Vec<String>| v.join(", ");

@@ -3,7 +3,11 @@
 //! The GUI never runs as root; it talks to this daemon over a Unix socket.
 
 #[cfg(target_os = "linux")]
+mod askpass;
+#[cfg(target_os = "linux")]
 mod auth;
+#[cfg(target_os = "linux")]
+mod cancel;
 #[cfg(target_os = "linux")]
 mod engine;
 #[cfg(target_os = "linux")]
@@ -18,6 +22,8 @@ mod persist;
 mod resolver;
 #[cfg(target_os = "linux")]
 mod server;
+#[cfg(target_os = "linux")]
+mod socks_dns;
 
 #[cfg(not(target_os = "linux"))]
 fn main() {
@@ -26,9 +32,22 @@ fn main() {
 }
 
 #[cfg(target_os = "linux")]
-#[tokio::main]
-async fn main() {
-    if let Err(e) = linux_main::run().await {
+fn main() {
+    // ssh runs `$SSH_ASKPASS "<prompt>"` (i.e. `alizyd "<prompt>"`, no flag) as
+    // the unprivileged alizy-ssh user, with ALIZY_ASKPASS_SOCK set; the explicit
+    // `--askpass PROMPT` form is accepted too. Handle it before any logging,
+    // runtime or root-only setup.
+    if askpass::invoked_as_client() {
+        std::process::exit(askpass::run_client());
+    }
+    let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("alizyd: cannot start async runtime: {e}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = rt.block_on(linux_main::run()) {
         eprintln!("alizyd: {e:#}");
         std::process::exit(1);
     }
@@ -37,7 +56,7 @@ async fn main() {
 #[cfg(target_os = "linux")]
 mod linux_main {
     use crate::auth::{AuthMode, Authorizer};
-    use crate::engine::Engine;
+    use crate::engine::{Engine, SshEnv};
     use crate::linux::{self, LinuxAdapter};
     use crate::persist::Persist;
     use crate::resolver::Resolver;
@@ -52,6 +71,7 @@ mod linux_main {
     const USAGE: &str = "usage: alizyd [--socket PATH] [--state-dir DIR] [--auth polkit|same-uid] [--group NAME]
               [--iface NAME] [--dns-backend auto|systemd-resolved|resolvconf|file|none]
               [--resolv-conf PATH]
+       alizyd --askpass PROMPT    (internal) SSH_ASKPASS helper run by ssh
        alizyd --probe             print the system compatibility report (JSON)
        alizyd --remove-firewall   remove Alizy's nftables table, routing rules and interface
        alizyd --version";
@@ -134,6 +154,38 @@ mod linux_main {
         }
     }
 
+    /// `alizy-ssh` (uid, primary gid), or `None` (SSH tunnels disabled) when the
+    /// user is missing or is root. Prepares the runtime directory when we are root.
+    fn ssh_env() -> SshEnv {
+        let runtime = PathBuf::from(linux::ssh::RUNTIME_DIR);
+        let user = match nix::unistd::User::from_name(linux::ssh::SSH_USER) {
+            Ok(Some(u)) if !u.uid.is_root() && u.gid.as_raw() != 0 => Some((u.uid.as_raw(), u.gid.as_raw())),
+            Ok(Some(_)) => {
+                tracing::error!("{} must not be root; SSH tunnels disabled", linux::ssh::SSH_USER);
+                None
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    "system user {} is missing; SSH tunnels are unavailable (WireGuard is unaffected)",
+                    linux::ssh::SSH_USER
+                );
+                None
+            }
+            Err(e) => {
+                tracing::warn!("looking up {}: {e}; SSH tunnels unavailable", linux::ssh::SSH_USER);
+                None
+            }
+        };
+        if let Some((_, gid)) = user {
+            if nix::unistd::geteuid().is_root() {
+                if let Err(e) = linux::ssh::ensure_runtime_dir(&runtime, 0, gid) {
+                    tracing::error!("SSH runtime directory {}: {e}", runtime.display());
+                }
+            }
+        }
+        SshEnv { user, runtime }
+    }
+
     async fn remove_everything() -> anyhow::Result<()> {
         for c in alizy_core::routing::teardown_commands(TUNNEL_IFACE) {
             let _ = crate::exec::run(&c, None).await;
@@ -192,6 +244,7 @@ mod linux_main {
             persist,
             Resolver::new(args.resolv_conf.clone()),
             args.iface.clone(),
+            ssh_env(),
         )
         .await;
 

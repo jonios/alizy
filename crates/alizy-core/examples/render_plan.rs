@@ -17,6 +17,7 @@ fn main() {
             "198.51.100.7:51820".parse().unwrap(),
             "[2001:db8::7]:51820".parse().unwrap(),
         ],
+        ..Default::default()
     });
     let direct = DirectSets {
         v4: vec![("192.0.2.0".parse().unwrap(), "192.0.2.127".parse().unwrap())],

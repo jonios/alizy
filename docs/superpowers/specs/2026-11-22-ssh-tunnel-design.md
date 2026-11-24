@@ -139,7 +139,12 @@ Order mirrors WireGuard: **firewall first, interface second**.
    -o PubkeyAuthentication=no -F /dev/null user@H`.
    Password delivery *(builder-check call; `ssh` closes inherited fds above 2,
    so an fd pipe cannot work)*: `SSH_ASKPASS_REQUIRE=force` with `SSH_ASKPASS`
-   pointing at `alizyd --askpass`. For each connect the daemon opens a one-shot
+   set to the `alizyd` executable. ssh runs `execlp(SSH_ASKPASS, SSH_ASKPASS,
+   prompt)`, i.e. `alizyd "<prompt>"` with no flag, so `alizyd` enters askpass
+   client mode from the environment: exactly one argument,
+   `ALIZY_ASKPASS_SOCK` set and euid ≠ 0. This is checked first in `main`,
+   before logging or any daemon setup. `alizyd --askpass PROMPT` is an
+   equivalent explicit form. For each connect the daemon opens a one-shot
    Unix socket `/run/alizy/ssh/<id>.askpass` (0600, owned `alizy-ssh`), checks
    the peer's `SO_PEERCRED` uid is `alizy-ssh`, requires a random per-connect
    token passed in the env, serves the password once, then removes the socket.

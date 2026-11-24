@@ -26,7 +26,7 @@ import { CopyButton } from "../../components/ui/copy-button";
 import { Tooltip } from "../../components/ui/tooltip";
 import { api } from "../../lib/api";
 import type { HistoryEntry, ProfileDetail, PublicPeer } from "../../lib/types";
-import { formatBytes, formatDateTime, formatDuration, relativeTime, shortKey } from "../../lib/format";
+import { endpointLabel, formatBytes, formatDateTime, formatDuration, relativeTime, shortKey } from "../../lib/format";
 import { STATE_LABEL, STATE_TONE, TONE_BG, TONE_TEXT, isBusyState } from "../../lib/constants";
 import { cn, errMsg } from "../../lib/utils";
 import { useNav } from "../../store/nav";
@@ -38,6 +38,7 @@ import { DeleteProfileDialog, ExportDialog } from "./dialogs";
 import { EditConfigDialog } from "./EditConfigDialog";
 import { PingBadge } from "./PingBadge";
 import { RevealKey } from "./RevealKey";
+import { SshProfileDialog, UdpNote } from "./SshProfileDialog";
 
 export function ProfileDetailsSheet() {
   const id = useNav((s) => s.detailsId);
@@ -63,7 +64,8 @@ function ProfileDetails({ id, onClose }: { id: string; onClose: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [history, setHistory] = useState<HistoryEntry[] | null>(null);
   const [historyError, setHistoryError] = useState<string | null>(null);
-  const [dialog, setDialog] = useState<"edit" | "export" | "delete" | null>(null);
+  const [dialog, setDialog] = useState<"edit" | "export" | "delete" | "ssh" | null>(null);
+  const [forgetting, setForgetting] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -141,6 +143,20 @@ function ProfileDetails({ id, onClose }: { id: string; onClose: () => void }) {
 
   const s = detail.summary;
   const c = detail.config;
+  const ssh = s.kind === "ssh" ? s.ssh : null;
+  const forgetKey = async () => {
+    setForgetting(true);
+    try {
+      await api.clearHostKey(s.id);
+      toast.success("Host key forgotten", "You will be asked to verify the server again on the next connection.");
+      void useProfiles.getState().load();
+      await load();
+    } catch (e) {
+      toast.error("Could not forget the host key", e);
+    } finally {
+      setForgetting(false);
+    }
+  };
   const categories = [...new Set(allProfiles.map((p) => p.category).filter((x): x is string => !!x))];
 
   return (
@@ -150,7 +166,7 @@ function ProfileDetails({ id, onClose }: { id: string; onClose: () => void }) {
         <div className="flex flex-col gap-6 px-6 pt-2 pb-8">
           <HeaderBlock detail={detail} onChanged={load} categories={categories} />
 
-          {detail.warnings.length > 0 && (
+          {!ssh && detail.warnings.length > 0 && (
             <div className="rounded-xl border border-warning/30 bg-warning/[0.06] p-4">
               <div className="flex items-center gap-2 text-[13px] font-medium text-fg">
                 <TriangleAlert className="size-4 text-warning" /> Compatibility warnings
@@ -163,67 +179,96 @@ function ProfileDetails({ id, onClose }: { id: string; onClose: () => void }) {
             </div>
           )}
 
+          {ssh ? (
+            <Section title="SSH connection">
+              <Grid>
+                <KV label="Server" mono copy={ssh.host}>
+                  {ssh.host}
+                </KV>
+                <KV label="Port">{ssh.port}</KV>
+                <KV label="Username">{ssh.username}</KV>
+                <KV label="Password">
+                  {s.password_needed ? <Badge tone="warning">Password needed</Badge> : <Badge tone="success">Saved</Badge>}
+                </KV>
+                <KV label="Host key" mono copy={ssh.host_key_fingerprint ?? undefined}>
+                  {ssh.host_key_fingerprint ?? <span className="font-sans text-faint">Not trusted yet</span>}
+                </KV>
+              </Grid>
+              {ssh.host_key_fingerprint && (
+                <div className="mt-3">
+                  <Button variant="secondary" size="sm" onClick={() => void forgetKey()} loading={forgetting}>
+                    Forget host key
+                  </Button>
+                </div>
+              )}
+              <UdpNote className="mt-3" />
+            </Section>
+          ) : (
+            <>
           <Section title="Interface">
-            <Grid>
-              <KV label="Public key" mono copy={c.interface_public_key}>
-                {shortKey(c.interface_public_key, 12, 6)}
-              </KV>
-              <KV label="Addresses" mono>
-                {c.addresses.length ? c.addresses.join(", ") : "—"}
-              </KV>
-              <KV label="DNS" mono>
-                {c.dns.length ? c.dns.join(", ") : "—"}
-                {c.dns_search.length > 0 && <span className="text-faint"> · search {c.dns_search.join(", ")}</span>}
-              </KV>
-              <KV label="MTU">{c.mtu ?? "auto"}</KV>
-              <KV label="Listen port">{c.listen_port ?? "random"}</KV>
-              <KV label="Routing">
-                {s.full_tunnel ? <Badge tone="primary">Full tunnel</Badge> : <Badge tone="outline">Partial routes</Badge>}
-              </KV>
-            </Grid>
-            <div className="mt-3">
-              <RevealKey id={s.id} />
-            </div>
-          </Section>
-
-          <Section title={`Peers (${c.peers.length})`}>
-            {c.peers.length === 0 ? (
-              <div className="rounded-xl border border-dashed border-border p-4 text-[13px] text-muted">This configuration has no peers.</div>
-            ) : (
-              <div className="flex flex-col gap-3">
-                {c.peers.map((peer, i) => (
-                  <div key={i} className="rounded-xl border border-border bg-surface p-4">
-                    <Grid>
-                      <KV label="Public key" mono copy={peer.public_key}>
-                        {shortKey(peer.public_key, 12, 6)}
-                      </KV>
-                      <KV label="Endpoint" mono>
-                        {hostOf(peer) ?? "—"}
-                      </KV>
-                      <KV label="Keepalive">{peer.persistent_keepalive ? `every ${peer.persistent_keepalive} s` : "off"}</KV>
-                      <KV label="Preshared key">
-                        {peer.has_preshared_key ? <Badge tone="success">Present</Badge> : <Badge tone="neutral">None</Badge>}
-                      </KV>
-                    </Grid>
-                    <div className="mt-3">
-                      <div className="mb-1.5 text-xs text-muted">Allowed IPs</div>
-                      <div className="flex flex-wrap gap-1.5">
-                        {peer.allowed_ips.length ? (
-                          peer.allowed_ips.map((ip) => (
-                            <span key={ip} className="selectable rounded-md border border-border bg-surface-2 px-1.5 py-0.5 font-mono text-[11px] text-fg">
-                              {ip}
-                            </span>
-                          ))
-                        ) : (
-                          <span className="text-xs text-faint">none</span>
-                        )}
+              <Grid>
+                <KV label="Public key" mono copy={c.interface_public_key}>
+                  {shortKey(c.interface_public_key, 12, 6)}
+                </KV>
+                <KV label="Addresses" mono>
+                  {c.addresses.length ? c.addresses.join(", ") : "—"}
+                </KV>
+                <KV label="DNS" mono>
+                  {c.dns.length ? c.dns.join(", ") : "—"}
+                  {c.dns_search.length > 0 && <span className="text-faint"> · search {c.dns_search.join(", ")}</span>}
+                </KV>
+                <KV label="MTU">{c.mtu ?? "auto"}</KV>
+                <KV label="Listen port">{c.listen_port ?? "random"}</KV>
+                <KV label="Routing">
+                  {s.full_tunnel ? <Badge tone="primary">Full tunnel</Badge> : <Badge tone="outline">Partial routes</Badge>}
+                </KV>
+              </Grid>
+              <div className="mt-3">
+                <RevealKey id={s.id} />
+              </div>
+            </Section>
+  
+            <Section title={`Peers (${c.peers.length})`}>
+              {c.peers.length === 0 ? (
+                <div className="rounded-xl border border-dashed border-border p-4 text-[13px] text-muted">This configuration has no peers.</div>
+              ) : (
+                <div className="flex flex-col gap-3">
+                  {c.peers.map((peer, i) => (
+                    <div key={i} className="rounded-xl border border-border bg-surface p-4">
+                      <Grid>
+                        <KV label="Public key" mono copy={peer.public_key}>
+                          {shortKey(peer.public_key, 12, 6)}
+                        </KV>
+                        <KV label="Endpoint" mono>
+                          {hostOf(peer) ?? "—"}
+                        </KV>
+                        <KV label="Keepalive">{peer.persistent_keepalive ? `every ${peer.persistent_keepalive} s` : "off"}</KV>
+                        <KV label="Preshared key">
+                          {peer.has_preshared_key ? <Badge tone="success">Present</Badge> : <Badge tone="neutral">None</Badge>}
+                        </KV>
+                      </Grid>
+                      <div className="mt-3">
+                        <div className="mb-1.5 text-xs text-muted">Allowed IPs</div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {peer.allowed_ips.length ? (
+                            peer.allowed_ips.map((ip) => (
+                              <span key={ip} className="selectable rounded-md border border-border bg-surface-2 px-1.5 py-0.5 font-mono text-[11px] text-fg">
+                                {ip}
+                              </span>
+                            ))
+                          ) : (
+                            <span className="text-xs text-faint">none</span>
+                          )}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </Section>
+                  ))}
+                </div>
+              )}
+            </Section>
+  
+            </>
+          )}
 
           <Section title="Recent connections" icon={<History className="size-3.5" />}>
             {historyError ? (
@@ -256,19 +301,32 @@ function ProfileDetails({ id, onClose }: { id: string; onClose: () => void }) {
           </Section>
 
           <div className="text-xs text-faint">
-            Added {formatDateTime(s.created_at)} · updated {relativeTime(s.updated_at)} · fingerprint{" "}
-            <span className="selectable font-mono">{s.fingerprint}</span>
+            Added {formatDateTime(s.created_at)} · updated {relativeTime(s.updated_at)}
+            {!ssh && (
+              <>
+                {" "}
+                · fingerprint <span className="selectable font-mono">{s.fingerprint}</span>
+              </>
+            )}
           </div>
         </div>
       </div>
 
       <div className="flex shrink-0 items-center gap-2 border-t border-border bg-surface px-6 py-3">
-        <Button variant="secondary" size="sm" onClick={() => setDialog("edit")}>
-          <Pencil /> Edit configuration
-        </Button>
-        <Button variant="secondary" size="sm" onClick={() => setDialog("export")}>
-          <Download /> Export
-        </Button>
+        {ssh ? (
+          <Button variant="secondary" size="sm" onClick={() => setDialog("ssh")}>
+            <Pencil /> Edit connection
+          </Button>
+        ) : (
+          <>
+            <Button variant="secondary" size="sm" onClick={() => setDialog("edit")}>
+              <Pencil /> Edit configuration
+            </Button>
+            <Button variant="secondary" size="sm" onClick={() => setDialog("export")}>
+              <Download /> Export
+            </Button>
+          </>
+        )}
         <Button
           variant="ghost"
           size="sm"
@@ -289,15 +347,26 @@ function ProfileDetails({ id, onClose }: { id: string; onClose: () => void }) {
         </Button>
       </div>
 
-      <EditConfigDialog
-        open={dialog === "edit"}
-        onOpenChange={(o) => !o && setDialog(null)}
-        id={s.id}
-        name={s.name}
-        initial={detail.config_text_redacted}
-        onSaved={load}
-      />
-      <ExportDialog open={dialog === "export"} onOpenChange={(o) => !o && setDialog(null)} id={s.id} name={s.name} />
+      {ssh ? (
+        <SshProfileDialog
+          open={dialog === "ssh"}
+          onOpenChange={(o) => !o && setDialog(null)}
+          profile={s}
+          onSaved={() => void load()}
+        />
+      ) : (
+        <>
+          <EditConfigDialog
+            open={dialog === "edit"}
+            onOpenChange={(o) => !o && setDialog(null)}
+            id={s.id}
+            name={s.name}
+            initial={detail.config_text_redacted}
+            onSaved={load}
+          />
+          <ExportDialog open={dialog === "export"} onOpenChange={(o) => !o && setDialog(null)} id={s.id} name={s.name} />
+        </>
+      )}
       <DeleteProfileDialog open={dialog === "delete"} onOpenChange={(o) => !o && setDialog(null)} id={s.id} name={s.name} onDeleted={onClose} />
     </>
   );
@@ -423,8 +492,10 @@ function HeaderBlock({ detail, onChanged, categories }: { detail: ProfileDetail;
             </div>
           )}
           <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted">
-            <span className="selectable font-mono">{s.endpoint ?? "no endpoint"}</span>
-            {s.endpoint && <PingBadge id={s.id} />}
+            <span className="selectable font-mono">{endpointLabel(s) ?? "no endpoint"}</span>
+            {(s.endpoint || s.ssh) && <PingBadge id={s.id} />}
+            {s.kind === "ssh" && <Badge tone="primary">SSH</Badge>}
+            {s.password_needed && <Badge tone="warning">Password needed</Badge>}
             {tone && status && (
               <span className={cn("inline-flex items-center gap-1.5 font-medium", TONE_TEXT[tone])}>
                 <Dot className={TONE_BG[tone]} pulse={isBusyState(status.state)} />

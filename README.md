@@ -40,6 +40,20 @@ Details: [ARCHITECTURE.md](ARCHITECTURE.md) · Security: [SECURITY.md](SECURITY.
 * Rust ≥ 1.80, Node.js ≥ 20 + npm
 * WebKitGTK 4.1 and GTK 3 development files, `libayatana-appindicator` (tray)
 * Runtime: kernel WireGuard, `wireguard-tools`, `nftables`, `iproute2`, `polkit`, systemd
+* Optional, for SSH profiles: `openssh` (`ssh`, `ssh-keyscan`) and `badvpn` (`badvpn-tun2socks`)
+
+**SSH profiles.** Besides WireGuard, a profile can be a VPN-style tunnel over
+SSH: `alizyd` runs `ssh -D` and `badvpn-tun2socks` as the unprivileged system
+user `alizy-ssh` and routes the system through a TUN device. Only TCP is
+tunnelled; UDP is blocked (no leaks), and DNS is forwarded over SOCKS from
+127.77.0.1:53.
+
+*Packagers:* ship `alizy.sysusers` (it creates the `alizy` group and the
+`alizy-ssh` user). The unit's capability bounding set includes `CAP_SETUID`,
+`CAP_SETGID`, `CAP_KILL` and `CAP_NET_BIND_SERVICE` for this. Do not add a
+tmpfiles.d entry for `/run/alizy/ssh`: `RuntimeDirectory=alizy` is recreated on
+each start and the daemon creates `/run/alizy/ssh` (0750 root:alizy-ssh) itself.
+`alizyd` must stay mode 0755: it doubles as `SSH_ASKPASS` for ssh.
 
 Check a machine at any time (prints exact missing requirements and the install
 command for pacman/apt/dnf/zypper — nothing is installed automatically):

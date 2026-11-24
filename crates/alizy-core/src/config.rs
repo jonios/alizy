@@ -445,6 +445,22 @@ pub fn parse(text: &str) -> Result<ParseOutcome, ConfigError> {
 }
 
 impl WgConfig {
+    /// All-zero-key, peerless filler for `TunnelSpec.config` when `ssh` is set.
+    /// Not a usable WireGuard config: it has no peers and no addresses.
+    pub fn placeholder() -> WgConfig {
+        WgConfig {
+            interface: InterfaceConfig {
+                private_key: SecretKey::from_bytes([0u8; 32]),
+                addresses: Vec::new(),
+                dns: Vec::new(),
+                dns_search: Vec::new(),
+                mtu: None,
+                listen_port: None,
+            },
+            peers: Vec::new(),
+        }
+    }
+
     pub fn split(&self) -> (PublicConfig, ProfileSecrets) {
         let public = PublicConfig {
             interface_public_key: self.interface.private_key.public_key(),

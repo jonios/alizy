@@ -10,7 +10,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 base64.workspace = true
-zeroize.workspace = true
+zeroize = { workspace = true, features = ["serde"] }
 ipnet.workspace = true
 sha2.workspace = true
 hex.workspace = true

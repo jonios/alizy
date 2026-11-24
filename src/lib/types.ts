@@ -66,6 +66,8 @@ export interface DaemonStatus {
   tunnel_config: PublicConfig | null;
   daemon_version: string;
   dns_backend: DnsBackend;
+  /** "wireguard" | "ssh" while a tunnel is up, else null/absent. */
+  tunnel_kind?: string | null;
 }
 
 /** Emitted on "alizy://status" about once per second. */
@@ -90,10 +92,59 @@ export interface ProfileSummary {
   updated_at: number;
   last_connected_at: number | null;
   fingerprint: string;
+  kind: ProfileKind;
+  /** Non-secret SSH fields; null for WireGuard profiles. */
+  ssh: SshSummary | null;
+  /** SSH only: the stored password is unusable and must be re-entered. */
+  password_needed: boolean;
+}
+
+export type ProfileKind = "wireguard" | "ssh";
+
+/** A pinned SSH server host key (known_hosts style). */
+export interface HostKey {
+  key_type: string;
+  key_b64: string;
+}
+
+export interface SshSummary {
+  host: string;
+  port: number;
+  username: string;
+  /** "SHA256:..." of the pinned host key, null until one is trusted. */
+  host_key_fingerprint: string | null;
+}
+
+/** What `api.connect` rejects with (a plain object, not an Error). */
+export type ConnectErrorCode =
+  | "host_key_unknown"
+  | "host_key_changed"
+  | "auth_failed"
+  | "missing_dependency"
+  | "cancelled"
+  | "password_needed"
+  | "tunnel"
+  | "bad_request"
+  | "unauthorized"
+  | "invalid_config"
+  | "firewall"
+  | "busy"
+  | "unsupported"
+  | "internal"
+  | "other";
+
+export interface ConnectError {
+  code: ConnectErrorCode;
+  message: string;
+  /** Present for host_key_unknown / host_key_changed: the key the server presented. */
+  host_key?: HostKey;
+  /** SHA256 fingerprint of host_key. */
+  fingerprint?: string;
 }
 
 export interface ProfileDetail {
   summary: ProfileSummary;
+  /** Placeholder for SSH profiles (summary.kind === "ssh"): ignore it, use summary.ssh. */
   config: PublicConfig;
   /** wg-quick text with secrets replaced by "<redacted>" */
   config_text_redacted: string;

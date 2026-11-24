@@ -2,13 +2,17 @@
 //! layers below; nothing is ever passed to a shell; privileged operations go
 //! to alizyd through explicit IPC commands only.
 
+use crate::daemon_client::CallError;
 use crate::state::{AppSettings, AppState, SETTINGS_KEY};
 use alizy_core::firewall::NetworkPolicy;
+use alizy_core::ipc::ErrorCode;
 use alizy_core::ipc::{Command, DaemonStatus, Payload, RouteTest, SplitStatus, TunnelSpec};
 use alizy_core::routing::compatibility_warnings;
 use alizy_core::split::{import_rules, Action, ImportResult, SplitConfig};
+use alizy_core::ssh::{HostKey, SshPublic};
 use alizy_core::sysprobe::SystemReport;
-use alizy_store::ProfileRow;
+use alizy_store::manager::ManagerError;
+use alizy_store::{ProfileKind, ProfileRow};
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -40,6 +44,31 @@ pub struct ProfileSummary {
     updated_at: i64,
     last_connected_at: Option<i64>,
     fingerprint: String,
+    /// "wireguard" | "ssh".
+    kind: ProfileKind,
+    /// Non-secret SSH fields; `None` for WireGuard profiles.
+    ssh: Option<SshSummary>,
+    /// SSH only: the stored password is unusable and must be re-entered.
+    password_needed: bool,
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+pub struct SshSummary {
+    host: String,
+    port: u16,
+    username: String,
+    host_key_fingerprint: Option<String>,
+}
+
+impl From<&SshPublic> for SshSummary {
+    fn from(p: &SshPublic) -> Self {
+        Self {
+            host: p.host.to_string(),
+            port: p.port,
+            username: p.username.clone(),
+            host_key_fingerprint: p.host_key.as_ref().map(HostKey::fingerprint_sha256),
+        }
+    }
 }
 
 /// Endpoint of the first peer that has one — the address the UI shows and
@@ -50,6 +79,30 @@ fn first_endpoint(cfg: &alizy_core::PublicConfig) -> Option<&alizy_core::config:
 
 impl From<&ProfileRow> for ProfileSummary {
     fn from(r: &ProfileRow) -> Self {
+        if let (ProfileKind::Ssh, Some(p)) = (&r.kind, &r.ssh) {
+            // SSH rows keep a placeholder WireGuard config; derive everything
+            // from the SSH endpoint. The tunnel always carries all traffic;
+            // has_ipv4 is always true (the tunnel provides IPv4) and has_ipv6
+            // follows the server's address family.
+            return Self {
+                id: r.id.clone(),
+                name: r.name.clone(),
+                category: r.category.clone(),
+                favorite: r.favorite,
+                endpoint: Some(std::net::SocketAddr::new(p.host, p.port).to_string()),
+                addresses: vec![],
+                has_ipv4: true,
+                has_ipv6: p.host.is_ipv6(),
+                full_tunnel: true,
+                created_at: r.created_at,
+                updated_at: r.updated_at,
+                last_connected_at: r.last_connected_at,
+                fingerprint: r.fingerprint.clone(),
+                kind: ProfileKind::Ssh,
+                ssh: Some(p.into()),
+                password_needed: r.password_needed,
+            };
+        }
         let fam = r.config.tunnel_families();
         Self {
             id: r.id.clone(),
@@ -65,6 +118,9 @@ impl From<&ProfileRow> for ProfileSummary {
             updated_at: r.updated_at,
             last_connected_at: r.last_connected_at,
             fingerprint: r.fingerprint.clone(),
+            kind: ProfileKind::Wireguard,
+            ssh: None,
+            password_needed: false,
         }
     }
 }
@@ -215,17 +271,24 @@ pub async fn profiles_list(st: S<'_>) -> R<Vec<ProfileSummary>> {
         .collect())
 }
 
-/// ICMP-echo every profile's endpoint host and report the round trip.
-/// Profiles sharing a host are probed once; results are not stored anywhere.
+/// ICMP-echo every profile's target host — the WireGuard endpoint, or the
+/// SSH server address — and report the round trip. Profiles sharing a host
+/// are probed once; results are not stored anywhere.
 #[tauri::command]
 pub async fn profiles_ping(st: S<'_>) -> R<Vec<crate::ping::PingResult>> {
     let rows = st.profiles.db.list_profiles().await.map_err(e)?;
     let targets: Vec<(String, String)> = rows
         .iter()
         .filter_map(|r| {
-            let host = match &first_endpoint(&r.config)?.host {
-                alizy_core::config::Host::Ip(ip) => ip.to_string(),
-                alizy_core::config::Host::Name(name) => name.clone(),
+            // SSH rows carry a placeholder WireGuard config and keep their
+            // (literal) address in `ssh`, so they need no endpoint parsing.
+            let host = if let Some(ssh) = &r.ssh {
+                ssh.host.to_string()
+            } else {
+                match &first_endpoint(&r.config)?.host {
+                    alizy_core::config::Host::Ip(ip) => ip.to_string(),
+                    alizy_core::config::Host::Name(name) => name.clone(),
+                }
             };
             Some((r.id.clone(), host))
         })
@@ -235,6 +298,8 @@ pub async fn profiles_ping(st: S<'_>) -> R<Vec<crate::ping::PingResult>> {
 
 #[derive(Serialize)]
 pub struct ProfileDetail {
+    /// For `summary.kind == "ssh"`, `config` is a meaningless placeholder and
+    /// `config_text_redacted` is a short secret-free description.
     summary: ProfileSummary,
     config: alizy_core::PublicConfig,
     config_text_redacted: String,
@@ -247,7 +312,13 @@ pub async fn profile_get(st: S<'_>, id: String) -> R<ProfileDetail> {
     let policy = current_policy(&st).await;
     Ok(ProfileDetail {
         summary: ProfileSummary::from(&row),
-        warnings: compatibility_warnings(&row.config, &policy),
+        // SSH rows hold a placeholder WireGuard config: no compatibility
+        // warnings, and `config` must be ignored by the UI (use summary.ssh).
+        warnings: if row.kind == ProfileKind::Ssh {
+            vec![]
+        } else {
+            compatibility_warnings(&row.config, &policy)
+        },
         config_text_redacted: alizy_store::manager::redacted_text(&row).to_string(),
         config: row.config,
     })
@@ -327,7 +398,7 @@ pub async fn profile_set_favorite(app: AppHandle, st: S<'_>, id: String, favorit
 #[tauri::command]
 pub async fn profile_update_text(app: AppHandle, st: S<'_>, id: String, text: String) -> R<Vec<String>> {
     let text = zeroize::Zeroizing::new(text);
-    let w = st.profiles.update_text(&id, &text).await.map_err(e)?;
+    let w = st.profiles.update_text(&id, &text).await.map_err(manager_err)?;
     st.log("info", "app", format!("Profile {id} configuration edited."))
         .await;
     let _ = app.emit(PROFILES_CHANGED, ());
@@ -339,6 +410,115 @@ pub async fn profile_duplicate(app: AppHandle, st: S<'_>, id: String) -> R<Profi
     let row = st.profiles.duplicate(&id).await.map_err(e)?;
     let _ = app.emit(PROFILES_CHANGED, ());
     Ok(ProfileSummary::from(&row))
+}
+
+/// Parse the server address. An IPv4-mapped IPv6 address (`::ffff:a.b.c.d`)
+/// is stored as the plain IPv4 address: ssh would connect over IPv4 anyway,
+/// and the core validation (which rejects mapped addresses) then applies the
+/// IPv4 rules, e.g. to a mapped loopback.
+fn parse_host(host: &str) -> R<std::net::IpAddr> {
+    host.trim()
+        .parse::<std::net::IpAddr>()
+        .map(|ip| ip.to_canonical())
+        .map_err(|_| "Server IP Address must be an IPv4 or IPv6 address".to_string())
+}
+
+fn manager_err(err: ManagerError) -> String {
+    err.to_string()
+}
+
+#[tauri::command]
+pub async fn profile_create_ssh(
+    app: AppHandle,
+    st: S<'_>,
+    name: String,
+    host: String,
+    port: u16,
+    username: String,
+    password: String,
+) -> R<ProfileSummary> {
+    let password = zeroize::Zeroizing::new(password);
+    let public = SshPublic {
+        host: parse_host(&host)?,
+        port,
+        username,
+        host_key: None,
+        dns: vec![],
+    };
+    let row = st
+        .profiles
+        .create_ssh(&name, public, password)
+        .await
+        .map_err(manager_err)?;
+    st.log("info", "app", format!("SSH profile \"{}\" created.", row.name))
+        .await;
+    let _ = app.emit(PROFILES_CHANGED, ());
+    Ok(ProfileSummary::from(&row))
+}
+
+/// `password`: `None` or an empty string keeps the stored password.
+#[allow(clippy::too_many_arguments)] // mirrors the frontend call shape
+#[tauri::command]
+pub async fn profile_update_ssh(
+    app: AppHandle,
+    st: S<'_>,
+    id: String,
+    name: String,
+    host: String,
+    port: u16,
+    username: String,
+    password: Option<String>,
+) -> R<ProfileSummary> {
+    let password = password.filter(|p| !p.is_empty()).map(zeroize::Zeroizing::new);
+    let existing = st.profiles.db.get_profile(&id).await.map_err(e)?;
+    let old = existing.ssh.ok_or_else(|| "this is not an SSH profile".to_string())?;
+    let public = SshPublic {
+        host: parse_host(&host)?,
+        port,
+        username,
+        // The store drops the pinned key itself if the endpoint changed.
+        host_key: old.host_key,
+        dns: old.dns,
+    };
+    let row = st
+        .profiles
+        .update_ssh(&id, &name, public, password)
+        .await
+        .map_err(manager_err)?;
+    st.log("info", "app", format!("SSH profile \"{}\" updated.", row.name))
+        .await;
+    let _ = app.emit(PROFILES_CHANGED, ());
+    Ok(ProfileSummary::from(&row))
+}
+
+#[tauri::command]
+pub async fn profile_trust_host_key(app: AppHandle, st: S<'_>, id: String, key: HostKey) -> R<()> {
+    key.validate()?;
+    st.profiles
+        .set_ssh_host_key(&id, Some(key.clone()))
+        .await
+        .map_err(manager_err)?;
+    st.log(
+        "info",
+        "app",
+        format!("Pinned SSH host key {} for profile {id}.", key.fingerprint_sha256()),
+    )
+    .await;
+    let _ = app.emit(PROFILES_CHANGED, ());
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn profile_clear_host_key(app: AppHandle, st: S<'_>, id: String) -> R<()> {
+    st.profiles.set_ssh_host_key(&id, None).await.map_err(manager_err)?;
+    st.log(
+        "info",
+        "app",
+        format!("Cleared the pinned SSH host key for profile {id}."),
+    )
+    .await;
+    let _ = app.emit(PROFILES_CHANGED, ());
+    Ok(())
 }
 
 #[tauri::command]
@@ -378,7 +558,7 @@ pub async fn profile_export(st: S<'_>, id: String, path: String, include_private
     st.profiles
         .export(&id, &check_path(&path)?, include_private)
         .await
-        .map_err(e)
+        .map_err(manager_err)
 }
 
 #[tauri::command]
@@ -389,7 +569,12 @@ pub async fn profile_reveal_private_key(st: S<'_>, id: String) -> R<String> {
         format!("Private key of profile {id} was revealed in the UI."),
     )
     .await;
-    Ok(st.profiles.reveal_private_key(&id).await.map_err(e)?.to_string())
+    Ok(st
+        .profiles
+        .reveal_private_key(&id)
+        .await
+        .map_err(manager_err)?
+        .to_string())
 }
 
 #[tauri::command]
@@ -408,33 +593,123 @@ pub async fn backup_import(app: AppHandle, st: S<'_>, path: String) -> R<ImportR
 
 // ───────────────────────────── connection ─────────────────────────────
 
+/// Structured connect failure. The GUI branches on `code`; `host_key` and
+/// `fingerprint` are set for host-key errors so the user can verify and trust.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct ConnectError {
+    pub code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_key: Option<HostKey>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+}
+
+impl ConnectError {
+    fn new(code: &str, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            host_key: None,
+            fingerprint: None,
+        }
+    }
+}
+
+impl From<alizy_core::ipc::IpcError> for ConnectError {
+    fn from(err: alizy_core::ipc::IpcError) -> Self {
+        let code = match err.code {
+            ErrorCode::BadRequest => "bad_request",
+            ErrorCode::Unauthorized => "unauthorized",
+            ErrorCode::InvalidConfig => "invalid_config",
+            ErrorCode::Firewall => "firewall",
+            ErrorCode::Tunnel => "tunnel",
+            ErrorCode::Busy => "busy",
+            ErrorCode::Unsupported => "unsupported",
+            ErrorCode::Internal => "internal",
+            ErrorCode::HostKeyUnknown => "host_key_unknown",
+            ErrorCode::HostKeyChanged => "host_key_changed",
+            ErrorCode::AuthFailed => "auth_failed",
+            ErrorCode::MissingDependency => "missing_dependency",
+            ErrorCode::Cancelled => "cancelled",
+        };
+        let fingerprint = err.host_key.as_ref().map(HostKey::fingerprint_sha256);
+        Self {
+            code: code.into(),
+            message: err.message,
+            host_key: err.host_key,
+            fingerprint,
+        }
+    }
+}
+
+impl From<CallError> for ConnectError {
+    fn from(err: CallError) -> Self {
+        match err {
+            CallError::Ipc(i) => i.into(),
+            CallError::Local(m) => Self::new("other", m),
+        }
+    }
+}
+
+impl From<ManagerError> for ConnectError {
+    fn from(err: ManagerError) -> Self {
+        match err {
+            ManagerError::PasswordNeeded => Self::new("password_needed", err.to_string()),
+            other => Self::new("other", other.to_string()),
+        }
+    }
+}
+
 #[tauri::command]
-pub async fn connect(st: S<'_>, id: String) -> R<()> {
+pub async fn connect(st: S<'_>, id: String) -> Result<(), ConnectError> {
     connect_profile(&st, &id).await
 }
 
-pub async fn connect_profile(st: &AppState, id: &str) -> R<()> {
-    let row = st.profiles.db.get_profile(id).await.map_err(e)?;
-    let config = st.profiles.full_config(id).await.map_err(e)?;
-    let spec = TunnelSpec {
-        profile_id: row.id.clone(),
-        profile_name: row.name.clone(),
-        config,
-        cached_endpoints: row.cached_endpoints.clone(),
+pub async fn connect_profile(st: &AppState, id: &str) -> Result<(), ConnectError> {
+    let row = st
+        .profiles
+        .db
+        .get_profile(id)
+        .await
+        .map_err(|err| ConnectError::new("other", err.to_string()))?;
+    let spec = if row.kind == ProfileKind::Ssh {
+        let ssh = st.profiles.full_ssh_config(id).await?;
+        TunnelSpec {
+            profile_id: row.id.clone(),
+            profile_name: row.name.clone(),
+            config: alizy_core::WgConfig::placeholder(),
+            cached_endpoints: vec![],
+            ssh: Some(ssh),
+        }
+    } else {
+        let config = st
+            .profiles
+            .full_config(id)
+            .await
+            .map_err(|err| ConnectError::new("other", err.to_string()))?;
+        TunnelSpec {
+            profile_id: row.id.clone(),
+            profile_name: row.name.clone(),
+            config,
+            cached_endpoints: row.cached_endpoints.clone(),
+            ssh: None,
+        }
     };
     st.log("info", "connection", format!("Connecting to \"{}\"…", row.name))
         .await;
     match st
         .daemon
-        .call(Command::Connect { spec: Box::new(spec) }, Duration::from_secs(60))
+        .call_ipc(Command::Connect { spec: Box::new(spec) }, Duration::from_secs(60))
         .await
     {
         Ok(_) => Ok(()),
         Err(err) => {
+            let err = ConnectError::from(err);
             st.log(
                 "error",
                 "connection",
-                format!("Connecting to \"{}\" failed: {err}", row.name),
+                format!("Connecting to \"{}\" failed: {}", row.name, err.message),
             )
             .await;
             Err(err)
@@ -675,5 +950,181 @@ fn export_target(t: &alizy_core::split::Target) -> String {
         } => format!(".{domain}"),
         Target::Ip { net } => net.to_string(),
         Target::App { path, .. } => path.clone(),
+    }
+}
+
+#[cfg(test)]
+mod ssh_tests {
+    use super::*;
+    use alizy_core::ipc::IpcError;
+    use serde_json::json;
+
+    fn key() -> HostKey {
+        HostKey {
+            key_type: "ssh-ed25519".into(),
+            key_b64: "AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl".into(),
+        }
+    }
+
+    fn ssh_row(host: &str, hk: Option<HostKey>, pw_needed: bool) -> ProfileRow {
+        ProfileRow {
+            id: "id1".into(),
+            name: "box".into(),
+            category: None,
+            favorite: false,
+            fingerprint: "fp".into(),
+            config: alizy_core::WgConfig::placeholder().split().0,
+            cached_endpoints: vec![],
+            created_at: 1,
+            updated_at: 2,
+            last_connected_at: None,
+            kind: ProfileKind::Ssh,
+            ssh: Some(SshPublic {
+                host: host.parse().unwrap(),
+                port: 2222,
+                username: "root".into(),
+                host_key: hk,
+                dns: vec![],
+            }),
+            password_needed: pw_needed,
+        }
+    }
+
+    #[test]
+    fn ssh_summary_v4() {
+        let v = serde_json::to_value(ProfileSummary::from(&ssh_row("203.0.113.5", Some(key()), true))).unwrap();
+        assert_eq!(v["kind"], "ssh");
+        assert_eq!(v["endpoint"], "203.0.113.5:2222");
+        assert_eq!(v["addresses"], json!([]));
+        assert_eq!(v["full_tunnel"], true);
+        assert_eq!(v["has_ipv4"], true);
+        assert_eq!(v["has_ipv6"], false);
+        assert_eq!(v["password_needed"], true);
+        assert_eq!(v["ssh"]["host"], "203.0.113.5");
+        assert_eq!(v["ssh"]["port"], 2222);
+        assert_eq!(v["ssh"]["username"], "root");
+        assert_eq!(v["ssh"]["host_key_fingerprint"], key().fingerprint_sha256());
+        assert!(!v.to_string().contains("password\":"));
+    }
+
+    #[test]
+    fn ssh_summary_v6_brackets_and_no_key() {
+        let v = serde_json::to_value(ProfileSummary::from(&ssh_row("2001:db8::1", None, false))).unwrap();
+        assert_eq!(v["endpoint"], "[2001:db8::1]:2222");
+        assert_eq!(v["has_ipv6"], true);
+        assert_eq!(v["ssh"]["host_key_fingerprint"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn wg_summary_gets_only_the_three_new_fields() {
+        let mut row = ssh_row("203.0.113.5", None, false);
+        row.kind = ProfileKind::Wireguard;
+        row.ssh = None;
+        let v = serde_json::to_value(ProfileSummary::from(&row)).unwrap();
+        assert_eq!(v["kind"], "wireguard");
+        assert_eq!(v["ssh"], serde_json::Value::Null);
+        assert_eq!(v["password_needed"], false);
+        let mut keys: Vec<_> = v.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        let mut want = vec![
+            "id",
+            "name",
+            "category",
+            "favorite",
+            "endpoint",
+            "addresses",
+            "has_ipv4",
+            "has_ipv6",
+            "full_tunnel",
+            "created_at",
+            "updated_at",
+            "last_connected_at",
+            "fingerprint",
+            "kind",
+            "ssh",
+            "password_needed",
+        ];
+        want.sort();
+        assert_eq!(keys, want);
+    }
+
+    #[test]
+    fn connect_error_maps_every_code() {
+        use ErrorCode::*;
+        let cases = [
+            (BadRequest, "bad_request"),
+            (Unauthorized, "unauthorized"),
+            (InvalidConfig, "invalid_config"),
+            (Firewall, "firewall"),
+            (Tunnel, "tunnel"),
+            (Busy, "busy"),
+            (Unsupported, "unsupported"),
+            (Internal, "internal"),
+            (HostKeyUnknown, "host_key_unknown"),
+            (HostKeyChanged, "host_key_changed"),
+            (AuthFailed, "auth_failed"),
+            (MissingDependency, "missing_dependency"),
+            (Cancelled, "cancelled"),
+        ];
+        for (code, name) in cases {
+            // must agree with the daemon's serde name
+            assert_eq!(serde_json::to_value(code).unwrap(), name);
+            assert_eq!(ConnectError::from(IpcError::new(code, "m")).code, name);
+        }
+    }
+
+    #[test]
+    fn connect_error_carries_host_key_and_fingerprint() {
+        let mut ie = IpcError::new(ErrorCode::HostKeyChanged, "changed");
+        ie.host_key = Some(key());
+        let ce = ConnectError::from(ie);
+        assert_eq!(ce.fingerprint.as_deref(), Some(key().fingerprint_sha256().as_str()));
+        let v = serde_json::to_value(&ce).unwrap();
+        assert_eq!(v["host_key"]["key_type"], "ssh-ed25519");
+        let plain = serde_json::to_value(ConnectError::from(IpcError::new(ErrorCode::AuthFailed, "x"))).unwrap();
+        assert!(plain.get("host_key").is_none() && plain.get("fingerprint").is_none());
+    }
+
+    #[test]
+    fn connect_error_other_sources() {
+        assert_eq!(ConnectError::from(ManagerError::PasswordNeeded).code, "password_needed");
+        assert_eq!(ConnectError::from(CallError::Local("down".into())).code, "other");
+        assert_eq!(ConnectError::from(ManagerError::Invalid("x".into())).code, "other");
+    }
+
+    #[test]
+    fn host_parse() {
+        assert!(parse_host(" 192.0.2.1 ").is_ok());
+        assert!(parse_host("::1").is_ok());
+        let err = parse_host("example.com").unwrap_err();
+        assert_eq!(err, "Server IP Address must be an IPv4 or IPv6 address");
+    }
+
+    #[test]
+    fn host_parse_canonicalises_ipv4_mapped() {
+        let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+        assert_eq!(parse_host("::ffff:192.0.2.1").unwrap(), ip("192.0.2.1"));
+        assert_eq!(parse_host(" ::FFFF:c000:0201 ").unwrap(), ip("192.0.2.1"));
+        // Real IPv6 stays IPv6.
+        assert_eq!(parse_host("2001:db8::1").unwrap(), ip("2001:db8::1"));
+        // A mapped loopback becomes 127.0.0.1 and is then rejected by the core rules.
+        let public = SshPublic {
+            host: parse_host("::ffff:127.0.0.1").unwrap(),
+            port: 22,
+            username: "alice".into(),
+            host_key: None,
+            dns: vec![],
+        };
+        assert_eq!(public.host, ip("127.0.0.1"));
+        assert!(alizy_core::ssh::validate_public(&public).is_err());
+        // Without canonicalisation core refuses the mapped form outright.
+        let mapped = SshPublic {
+            host: ip("::ffff:192.0.2.1"),
+            ..public
+        };
+        assert_eq!(
+            alizy_core::ssh::validate_public(&mapped).unwrap_err(),
+            alizy_core::ssh::MAPPED_HOST_ERROR
+        );
     }
 }
