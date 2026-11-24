@@ -8,14 +8,18 @@ post_install() {
 }
 post_upgrade() {
   systemctl daemon-reload
+  local was_active=0
+  systemctl -q is-active alizyd.service && was_active=1
   systemctl try-restart alizyd.service
-  # An upgrade must never leave the machine with a half-applied kill switch
-  # and nothing able to manage it: if the new daemon did not come up, drop
-  # the rules it may have left behind rather than black-hole the network.
-  if ! systemctl -q is-active alizyd.service; then
+  # An upgrade must never leave a kill switch in the kernel that nothing is
+  # managing: if the service was running before and did not come back, drop
+  # Alizy's own rules rather than black-hole the network. A service that was
+  # deliberately stopped keeps its protection (fail closed), so it is left
+  # alone here.
+  if [ "$was_active" -eq 1 ] && ! systemctl -q is-active alizyd.service; then
     /usr/bin/alizyd --remove-firewall 2>/dev/null || true
-    echo ">>> alizyd did not come back after the upgrade, so its nftables rules"
-    echo ">>> were removed and the network stays reachable. Bring it back with:"
+    echo ">>> alizyd did not come back after the upgrade; its nftables rules were"
+    echo ">>> removed so the network stays reachable. Bring it back with:"
     echo ">>>     sudo systemctl enable --now alizyd"
   fi
 }
