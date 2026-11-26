@@ -33,6 +33,7 @@ export function Dashboard() {
   const { status, daemonError, received, pending, connect, disconnect } = useStatus();
   const profiles = useProfiles((s) => s.profiles);
   const settings = useSettings((s) => s.settings);
+  const appVersion = useSettings((s) => s.appInfo?.version ?? null);
   const go = useNav((s) => s.go);
   const [chosen, setChosen] = useState<string | null>(null);
 
@@ -62,6 +63,12 @@ export function Dashboard() {
       <ScreenHeader title="Dashboard" description="Connection overview and live tunnel health" />
       <ScreenBody className="flex flex-col gap-5">
         {received && daemonError && <DaemonBanner error={daemonError} />}
+        {appVersion && status?.daemon_version && status.daemon_version !== appVersion && (
+          <Alert tone="warning" title="App and service versions differ">
+            This app is v{appVersion}, the background service is v{status.daemon_version}. Run the matching{" "}
+            <code className="font-mono">alizy-installer</code> from the release page to update both together.
+          </Alert>
+        )}
 
         {status?.last_error && (
           <Alert tone="danger" title="Last connection error">

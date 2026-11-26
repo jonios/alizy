@@ -25,6 +25,15 @@ impl Default for DaemonClient {
 
 fn explain_connect_error(e: &std::io::Error, path: &str) -> String {
     match e.kind() {
+        std::io::ErrorKind::NotFound
+            if !["/usr/bin/alizyd", "/usr/local/bin/alizyd"]
+                .iter()
+                .any(|p| std::path::Path::new(p).exists()) =>
+        {
+            "The Alizy service (alizyd) is not installed. The app cannot connect or protect anything without it. \
+             Download alizy-installer from https://github.com/jonios/alizy/releases/latest and run it; it installs the service and asks for your password."
+                .to_string()
+        }
         std::io::ErrorKind::NotFound => format!(
             "The Alizy service (alizyd) is not running: {path} does not exist. Start it with `sudo systemctl enable --now alizyd`."
         ),

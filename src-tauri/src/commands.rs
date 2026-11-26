@@ -1156,3 +1156,17 @@ mod ssh_tests {
         );
     }
 }
+
+// ───────────────────────────── updates ─────────────────────────────
+
+#[tauri::command]
+pub async fn check_update() -> R<crate::update::UpdateInfo> {
+    tokio::task::spawn_blocking(|| crate::update::check(env!("CARGO_PKG_VERSION")))
+        .await
+        .map_err(e)?
+}
+
+#[tauri::command]
+pub fn open_releases_page() -> R<()> {
+    crate::update::open_releases_page()
+}

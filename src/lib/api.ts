@@ -23,6 +23,7 @@ import type {
   SplitImportResult,
   SplitStatus,
   SystemReport,
+  UpdateInfo,
   ValidationResult,
 } from "./types";
 
@@ -30,6 +31,9 @@ export const api = {
   appInfo: () => invoke<AppInfo>("app_info"),
   systemReport: () => invoke<SystemReport>("system_report"),
   status: () => invoke<DaemonStatus | null>("status"),
+  /** Asks GitHub for the newest release; downloads nothing. */
+  checkUpdate: () => invoke<UpdateInfo>("check_update"),
+  openReleasesPage: () => invoke<void>("open_releases_page"),
 
   // profiles
   profilesList: () => invoke<ProfileSummary[]>("profiles_list"),

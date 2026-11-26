@@ -259,6 +259,13 @@ export interface AppInfo {
   daemon: { reachable: boolean; version: string | null; error: string | null };
 }
 
+export interface UpdateInfo {
+  current: string;
+  latest: string;
+  update_available: boolean;
+  url: string;
+}
+
 // ─── system probe ───
 export type Severity = "blocker" | "warning" | "info";
 export interface Finding {

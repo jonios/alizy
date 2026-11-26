@@ -6,6 +6,7 @@ mod ping;
 mod poller;
 mod state;
 mod tray;
+mod update;
 
 use state::{AppSettings, AppState, SETTINGS_KEY};
 use std::sync::Arc;
@@ -161,6 +162,8 @@ pub fn run() {
             commands::route_test,
             commands::lan_proxy_get,
             commands::lan_proxy_set,
+            commands::check_update,
+            commands::open_releases_page,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Alizy");

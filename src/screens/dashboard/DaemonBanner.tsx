@@ -27,7 +27,15 @@ export function DaemonBanner({ error }: { error: string }) {
               Open System Check
             </Button>
             <span className="text-xs text-muted">
-              Typical fix: <code className="selectable font-mono text-fg">sudo systemctl enable --now alizyd</code>
+              {error.includes("not installed") ? (
+                <>
+                  Install it: download and run <code className="selectable font-mono text-fg">alizy-installer</code> from the release page.
+                </>
+              ) : (
+                <>
+                  Typical fix: <code className="selectable font-mono text-fg">sudo systemctl enable --now alizyd</code>
+                </>
+              )}
             </span>
           </div>
         </div>

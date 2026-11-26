@@ -12,7 +12,7 @@ import { EmptyState } from "../../components/ui/empty-state";
 import { ConfirmDialog } from "../../components/ui/dialog";
 import { Divider, SettingRow } from "../../components/ui/misc";
 import { api } from "../../lib/api";
-import type { Theme } from "../../lib/types";
+import type { Theme, UpdateInfo } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { useSettings } from "../../store/settings";
 import { useNav } from "../../store/nav";
@@ -239,6 +239,15 @@ function AboutCard() {
               )}
             </InfoRow>
           </div>
+          {appInfo.daemon.reachable &&
+            (appInfo.daemon.version ?? daemonVersion) !== null &&
+            (appInfo.daemon.version ?? daemonVersion) !== appInfo.version && (
+              <Alert tone="warning" icon={<TriangleAlert />} title="App and service versions differ">
+                This app is v{appInfo.version}, the background service is v{appInfo.daemon.version ?? daemonVersion}. Run the matching{" "}
+                <code className="font-mono">alizy-installer</code> from the release page to update both together.
+              </Alert>
+            )}
+          <UpdateCheck />
           {!appInfo.daemon.reachable && appInfo.daemon.error && (
             <Alert tone="danger" title="Service error">
               <span className="selectable">{appInfo.daemon.error}</span>
@@ -253,6 +262,52 @@ function AboutCard() {
         </div>
       )}
     </Card>
+  );
+}
+
+function UpdateCheck() {
+  const [busy, setBusy] = useState(false);
+  const [info, setInfo] = useState<UpdateInfo | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const run = async () => {
+    setBusy(true);
+    setInfo(null);
+    setError(null);
+    try {
+      setInfo(await api.checkUpdate());
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="flex flex-wrap items-center gap-3 rounded-xl border border-border px-4 py-3">
+      <div className="min-w-0 flex-1 text-[13px]">
+        {info ? (
+          info.update_available ? (
+            <span className="text-fg">
+              Alizy <b>v{info.latest}</b> is available (you have v{info.current}).
+            </span>
+          ) : (
+            <span className="text-muted">You have the latest version (v{info.current}).</span>
+          )
+        ) : error ? (
+          <span className="selectable text-danger">{error}</span>
+        ) : (
+          <span className="text-muted">Asks GitHub Releases for the newest version only when you press the button. Nothing is downloaded.</span>
+        )}
+      </div>
+      {info?.update_available && (
+        <Button size="sm" variant="primary" onClick={() => void api.openReleasesPage().catch((e) => toast.error("Could not open the browser", e))}>
+          Open release page
+        </Button>
+      )}
+      <Button size="sm" variant="secondary" onClick={() => void run()} disabled={busy}>
+        <RefreshCw className={busy ? "animate-spin" : ""} />
+        Check for updates
+      </Button>
+    </div>
   );
 }
 
