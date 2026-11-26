@@ -138,3 +138,16 @@ Windows (WireGuardNT + embeddable service + WFP) and macOS (WireGuardKit +
 NEPacketTunnelProvider) are **documented, not implemented** — see
 `docs/PLATFORMS.md`. The daemon binary on those targets exits with an explicit
 "unsupported platform" error rather than pretending to work.
+
+## Distribution
+
+| Artifact | Built by | Installs |
+|---|---|---|
+| `Alizy-x86_64.AppImage` | `tauri build --bundles appimage` on Ubuntu 22.04 | nothing; runs from any path as the user (`~/Applications` when added by the installer) |
+| `alizy-installer-x86_64` | `scripts/release/build.sh` | `alizyd` → `/usr/local/bin`, unit → `/usr/local/lib/systemd/system`, sysusers → `/usr/local/lib/sysusers.d`, polkit action → `/usr/share/polkit-1/actions`, manifest and a copy of itself → `/usr/local/lib/alizy` |
+| optional pacman packages | `packaging/aur/PKGBUILD`, `packaging/arch/PKGBUILD` | the same files under `/usr` |
+
+The installer (`packaging/installer/alizy-installer.sh` + a tar payload) refuses to
+manage a package-installed service, upgrades with rollback, and on uninstall removes
+Alizy's firewall/routing/DNS state before its files. Release process:
+[docs/RELEASING.md](docs/RELEASING.md); tests: [docs/TESTING.md](docs/TESTING.md).

@@ -1,3 +1,12 @@
+> **Status (2026-11-26): implemented, and partly superseded.** The release workflow
+> now ships the AppImage plus a separate system installer; see
+> [docs/APPIMAGE.md](docs/APPIMAGE.md), [docs/INSTALLATION.md](docs/INSTALLATION.md) and
+> [docs/TESTING.md](docs/TESTING.md). Two statements below proved wrong when checked
+> against the code and the distributions: Ubuntu 22.04 **does** ship WebKitGTK 4.1
+> (2.50 in jammy-updates), and the existing AppImage needed **glibc 2.39** because it
+> was built on Arch. Releases are now built on Ubuntu 22.04 (glibc ≤ 2.34 needed).
+> Kept for its reasoning.
+
 # Alizy — AppImage Packaging Feasibility
 
 > **خلاصه فارسی (TL;DR).** بله، بسته‌بندی به‌صورت AppImage ممکن است و در عمل

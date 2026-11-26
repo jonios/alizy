@@ -34,14 +34,17 @@ checks that the executables exist.
 
 ## Tested matrix
 
-Only configurations that were actually exercised are marked tested.
+Only configurations that were actually exercised are marked tested. Containers share
+the host's kernel; they test the distribution's userland, packages and systemd.
 
 | Distribution | Version | Kernel | Firewall | DNS backend | Desktop | Status |
 |---|---|---|---|---|---|---|
 | Omarchy / Ryoku (Arch-based) | rolling, 2026-11 | 7.2.8 | nftables 1.1.7, ufw active (iptables-nft) | systemd-resolved (real host); file + resolvconf (isolated) | Hyprland 0.57 (Lua) | **Tested, installed package** (`0.1.0-5`): see docs/REAL_SYSTEM_VALIDATION.md. Not tested here: Secret Service keyring path (no default keyring), Ethernet, NM-managed resolv.conf on the host |
-| Arch Linux / Manjaro / EndeavourOS | — | — | — | — | — | untested (same code path as above expected) |
-| Debian 12+, Ubuntu 22.04+, Linux Mint, Pop!_OS | — | — | — | — | — | untested |
-| Fedora 39+ | — | — | firewalld (nftables backend) | — | — | untested |
+| Arch Linux | rolling, 2026-11 (container) | host 7.2.8 | nftables | file | — | **Tested**: installer lifecycle + AppImage smoke test, [docs/TESTING.md](docs/TESTING.md) |
+| Manjaro / EndeavourOS | — | — | — | — | — | untested (same code path as Arch expected) |
+| Ubuntu 22.04 / 24.04, Debian 12 | containers, 2026-11 | host 7.2.8 | nftables | file | virtual display | **Tested**: installer lifecycle + AppImage smoke test, [docs/TESTING.md](docs/TESTING.md) |
+| Linux Mint, Pop!_OS | — | — | — | — | — | untested |
+| Fedora 45 | container, 2026-11 | host 7.2.8 | nftables (firewalld not running) | file | virtual display | **Tested**: installer lifecycle + AppImage smoke test, [docs/TESTING.md](docs/TESTING.md) |
 | openSUSE Tumbleweed / Leap | — | — | firewalld | — | — | untested |
 
 The namespace suite (`tests/leak/run.sh`) needs no root and is the

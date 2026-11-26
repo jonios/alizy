@@ -1,143 +1,122 @@
-# Releasing Alizy (GitHub tag + AUR)
+# Releasing Alizy
 
-The AUR package builds from a **git tag** of the GitHub repository:
+GitHub Releases is the release channel. Each release has exactly these assets:
 
+| Asset | Built by | Contents |
+|---|---|---|
+| `Alizy-x86_64.AppImage` | `tauri build --bundles appimage` | the desktop app with its GUI libraries |
+| `alizy-installer-x86_64` | `scripts/release/build.sh` | bash installer + tar payload: `alizyd`, systemd unit, sysusers file, polkit action, icons, LICENSE |
+| `SHA256SUMS` | `scripts/release/build.sh` | SHA-256 of both files |
+
+The asset names carry no version, so `https://github.com/jonios/alizy/releases/latest/download/<asset>`
+always points at the newest release. The version is inside: `alizyd --version`, the
+installer's `--help`, the app's About card, and the release tag.
+
+**Versions must match** across `Cargo.toml` (`[workspace.package] version`),
+`package.json` and `src-tauri/tauri.conf.json`. The build and the release workflow
+refuse to run otherwise, and the workflow also refuses a tag that isn't `v<version>`.
+
+## Build baseline
+
+Everything is built on **Ubuntu 22.04** (glibc 2.35, WebKitGTK 4.1), so the binaries
+run on that and every newer distribution. `scripts/release/build.sh` fails if any
+binary needs a newer glibc. The toolchain is pinned in two places, which must agree:
+`scripts/release/Containerfile` (local builds) and `.github/workflows/release.yml` (CI):
+Rust 1.100.0, Node.js 24.22.3.
+
+## Build locally
+
+```bash
+scripts/release/build-in-container.sh
 ```
-source=("alizy::git+https://github.com/jonios/alizy.git#tag=v$pkgver")
-sha256sums=('<sha256 of the tagged tree>')
+
+Builds the **current working tree** in the Ubuntu 22.04 container (podman or docker)
+and writes `dist-release/`. It runs the whole test suite first, then builds the daemon
+and the AppImage, assembles the installer, verifies the glibc floor, the AppImage
+contents and the installer's self-check, and writes and verifies `SHA256SUMS`.
+
+Then test the result:
+
+```bash
+tests/installer/run.sh ubuntu22
 ```
 
-makepkg verifies a git tag source by computing
-`git -c core.abbrev=no archive --format tar <tag> | sha256sum` over the cloned
-repository (pacman ≥ 6.1). The checksum therefore depends only on the tagged
-commit's content, never on GitHub's tarball compression, and you can compute it
-locally **before** pushing. Moving a tag after release changes the checksum, so
-users' builds fail loudly instead of silently building different code.
+```bash
+tests/installer/run.sh fedora
+```
 
-`packaging/aur-release.sh` does all the PKGBUILD edits for you.
+(and `ubuntu24`, `debian12`). Each run boots that distribution with systemd in a
+container, without Alizy's dependencies, and goes through install, a real WireGuard
+tunnel, kill switch, upgrade while connected, failed-upgrade rollback, uninstall with
+DNS restore, reinstall and purge. Build the images once with:
 
-## Files
-
-| Path | Purpose |
-|---|---|
-| `packaging/aur/PKGBUILD` | AUR package (split: `alizyd` + `alizy`) |
-| `packaging/aur/.SRCINFO` | Generated; must always match the PKGBUILD |
-| `packaging/aur/alizyd.install` | pacman scriptlets (install/upgrade/remove) |
-| `packaging/aur-release.sh` | Sets version + checksum, regenerates `.SRCINFO`, optional test build |
-| `packaging/arch/PKGBUILD` | Development only: packages the local working tree (`makepkg -si`). Keep its dependencies and `package_*()` steps in sync with the AUR one. |
+```bash
+for d in "ubuntu22 ubuntu:22.04" "ubuntu24 ubuntu:24.04" "debian12 debian:12" "fedora fedora:latest"; do set -- $d; podman build --build-arg BASE=docker.io/library/$2 -t localhost/alizy-itest:$1 tests/installer; done
+```
 
 ## Release checklist
 
-1. **Bump the version** in all three places (they must agree; the script checks):
-   `Cargo.toml` (`[workspace.package] version`), `package.json`,
-   `src-tauri/tauri.conf.json`. Then run `cargo update -w` so `Cargo.lock` follows,
-   and `npm install --package-lock-only` so `package-lock.json` follows.
-
-2. **Verify** on the release commit:
-
-   ```bash
-   cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings
-   ```
-
-   ```bash
-   cargo test --workspace && npm run build
-   ```
-
-3. **Commit and tag** (annotated tag, `v` prefix):
+1. **Bump the version** in `Cargo.toml`, `package.json`, `src-tauri/tauri.conf.json`,
+   then `cargo update -w` and `npm install --package-lock-only`.
+2. **Checks** pass: `cargo fmt --all -- --check`,
+   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`,
+   `npm run build` (the `ci` workflow runs the same on every push).
+3. **Local release build and installer tests** (above), at least one distribution.
+4. **Commit, then tag** (annotated, `v` prefix) and push the tag:
 
    ```bash
    git tag -a v0.2.0 -m "Alizy 0.2.0"
    ```
 
-4. **Prepare the PKGBUILD and test-build the tag locally**, before pushing:
-
-   ```bash
-   packaging/aur-release.sh 0.2.0 --build
-   ```
-
-   This writes `pkgver`, `pkgrel=1` and the checksum into `packaging/aur/PKGBUILD`,
-   regenerates `.SRCINFO`, then builds the tag from this local clone in a temporary
-   directory (with `check()`) and copies the packages to `target/aur-test/`. Install
-   them (`sudo pacman -U target/aur-test/*.pkg.tar.zst`) to try the release on your
-   machine.
-
-5. **Commit the packaging change** (`packaging/aur/PKGBUILD`, `.SRCINFO`) and push
-   the branch **and the tag**:
-
    ```bash
    git push origin main v0.2.0
    ```
 
-6. **Optional: create a GitHub release** from the tag (release notes). The AUR package
-   doesn't need release assets.
+5. The **release workflow** (`.github/workflows/release.yml`) runs on the tag: same
+   build script on an `ubuntu-22.04` runner, then it creates a **draft** release with
+   the three assets and install notes containing the checksums.
+6. **Review the draft** on GitHub: download the assets, `sha256sum -c SHA256SUMS`, try
+   the installer. Write the release notes (what changed, anything users must know).
+7. **Publish** the draft. Only now is the release public.
 
-7. **Publish to the AUR** (next section).
+A tag can also be (re)built by hand: *Actions → release → Run workflow* with the tag
+name; it uploads to the existing draft.
 
-### Packaging-only fix (same version)
+### Never move a published tag
 
-When only the PKGBUILD or `alizyd.install` changes, keep `pkgver` and bump `pkgrel`:
+Users and the optional AUR package verify what they download. If a release is broken,
+publish a new patch version.
 
-```bash
-packaging/aur-release.sh 0.2.0 2
-```
+## Signing
 
-### Install-script changes need a GitHub release too?
+Releases are currently protected by HTTPS from GitHub and `SHA256SUMS`. There is no
+cryptographic signature yet. Adding one (e.g. minisign or GPG over `SHA256SUMS`) needs
+a long-lived key held by the maintainer; when added, document the public key in the
+README and verify it in the install instructions.
 
-No. `alizyd.install` lives in the AUR repository next to the PKGBUILD, not in the
-tag. The files under `packaging/linux/` (unit, sysusers, polkit policy, desktop file)
-**are** taken from the tag, so changing those needs a new tag.
+## aarch64
 
-## Publishing to the AUR
+Not built yet. Tauri and every dependency support aarch64 Linux, and GitHub offers
+`ubuntu-22.04-arm` runners, so a second job in `release.yml` with `runs-on:
+ubuntu-22.04-arm` (and `uname -m` checks in `build.sh` and the installer relaxed to
+`aarch64`) should work. It has not been built or tested; don't ship it untested.
 
-One-time setup:
+## Optional: the AUR package
 
-1. Create an account at <https://aur.archlinux.org/register>.
-2. Add your SSH **public** key under *My Account → SSH Public Key*.
-3. Add this to `~/.ssh/config`:
-
-   ```
-   Host aur.archlinux.org
-     IdentityFile ~/.ssh/aur
-     User aur
-   ```
-
-4. Fill in the `# Maintainer:` line of `packaging/aur/PKGBUILD` with your name and
-   an email address (an obfuscated form like `name at example dot com` is common).
-
-First publication (the AUR creates the package when you push to a new name):
+`packaging/aur/` holds a ready AUR package (split `alizyd` + `alizy`, built from the git
+tag). It is optional and not required for releases. AUR account registration was closed
+when it was prepared. To publish a release there:
 
 ```bash
-git clone ssh://aur@aur.archlinux.org/alizy.git ~/aur/alizy
+packaging/aur-release.sh 0.2.0 --build
 ```
 
-```bash
-cp packaging/aur/{PKGBUILD,.SRCINFO,alizyd.install} ~/aur/alizy/
-```
+This writes `pkgver`, `pkgrel=1` and the tag's checksum
+(`git archive --format tar <tag> | sha256sum`, the same thing makepkg verifies) into
+`packaging/aur/PKGBUILD`, regenerates `.SRCINFO` and test-builds the tag locally. Commit
+that, then push `PKGBUILD`, `.SRCINFO` and `alizyd.install` to
+`ssh://aur@aur.archlinux.org/alizy.git`. Packaging-only fixes keep `pkgver` and bump
+`pkgrel`: `packaging/aur-release.sh 0.2.0 2`.
 
-```bash
-cd ~/aur/alizy && git add PKGBUILD .SRCINFO alizyd.install && git commit -m "Initial import: alizy 0.1.0-1" && git push
-```
-
-Every later release: same `cp`, then `git commit -m "Update to 0.2.0-1"` and
-`git push`.
-
-The AUR repository must contain only `PKGBUILD`, `.SRCINFO` and `alizyd.install`, on
-branch `master`. It must not contain built packages or the `src/`/`pkg/` folders.
-The pkgbase `alizy` publishes both package names, `alizy` and `alizyd`, from one
-repository.
-
-### Pre-push checks
-
-Run these in `packaging/aur/`:
-
-```bash
-makepkg --printsrcinfo | diff - .SRCINFO && echo ".SRCINFO matches"
-```
-
-```bash
-namcap PKGBUILD
-```
-
-Optional, the strongest check, which catches undeclared build dependencies: build in
-a clean chroot (`sudo pacman -S devtools`, then `pkgctl build` or
-`extra-x86_64-build` inside `packaging/aur/`).
+`packaging/arch/PKGBUILD` packages your local working tree (`makepkg -si`) for
+development; keep its dependency lists in sync with the AUR one.

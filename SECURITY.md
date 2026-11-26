@@ -22,6 +22,10 @@
 | Privileged SSH tooling | `ssh`, `ssh-keyscan`, `ssh -V` and `badvpn-tun2socks` never run as root: they run as the unprivileged `alizy-ssh` system user (uid and gid set, supplementary groups dropped and re-checked, cleared environment, fixed `PATH`, killed with the daemon) |
 | Password helper hijack | the askpass socket is one-shot, `0600` owned by alizy-ssh, accepts only peers whose `SO_PEERCRED` uid is alizy-ssh and that present the random token issued for that connection attempt; it is unlinked after the first answer or after 60 s |
 | UDP leaking around a TCP-only tunnel | while an SSH profile is up, UDP into the tunnel interface is always rejected (output and forward), so nothing silently falls back; DNS goes through the daemon's DNS-over-TCP forwarder |
+| Tampered or truncated download | release assets ship with `SHA256SUMS` (verify before running); the installer checks its embedded payload against a SHA-256 in its own header before using it |
+| Installer overwriting a package-managed install | the installer refuses when `alizyd` belongs to pacman/dpkg/rpm or a manual install; it only removes files listed in its own manifest |
+| Upgrade leaving the network unprotected or broken | kernel rules stay in place during the service restart; a new service that fails to start is rolled back to the previous version; uninstall refuses to finish while any Alizy table, interface or rule is left |
+| Update mechanism executing unverified code | there is none: the app only shows whether a newer release exists (on request) and never downloads or runs anything |
 
 ## Firewall ownership model
 
