@@ -14,7 +14,7 @@ pkgbase = alizy
 	options = !lto
 	options = !debug
 	source = alizy::git+https://github.com/jonios/alizy.git#tag=v0.1.0
-	sha256sums = 99c6283c291f8d95683420e23380a063c8f640df6b53837681422d0821361e97
+	sha256sums = aa122d8ddc862a1cc40110cf2744a326ad0c717c0abe34578a22af5425a6c72d
 
 pkgname = alizyd
 	pkgdesc = Privileged service of a WireGuard client: tunnels, nftables kill switch, DNS and split tunnelling
