@@ -10,7 +10,7 @@
 
 pkgbase=alizy
 pkgname=(alizyd alizy)
-pkgver=0.1.0
+pkgver=0.2.1
 pkgrel=1
 pkgdesc="WireGuard desktop client with an OS-level nftables kill switch"
 arch=(x86_64 aarch64)
@@ -19,7 +19,7 @@ license=(GPL-3.0-or-later)
 makedepends=(cargo git nodejs npm webkit2gtk-4.1)
 options=(!lto !debug)
 source=("$pkgbase::git+$url.git#tag=v$pkgver")
-sha256sums=('aa122d8ddc862a1cc40110cf2744a326ad0c717c0abe34578a22af5425a6c72d')
+sha256sums=('67db6b5c6e066d161ebf5dd640659fcb587f82cce2118718fdc2b47edf70dba5')
 
 prepare() {
   cd "$pkgbase"

@@ -1,6 +1,6 @@
 pkgbase = alizy
 	pkgdesc = WireGuard desktop client with an OS-level nftables kill switch
-	pkgver = 0.1.0
+	pkgver = 0.2.1
 	pkgrel = 1
 	url = https://github.com/jonios/alizy
 	arch = x86_64
@@ -13,8 +13,8 @@ pkgbase = alizy
 	makedepends = webkit2gtk-4.1
 	options = !lto
 	options = !debug
-	source = alizy::git+https://github.com/jonios/alizy.git#tag=v0.1.0
-	sha256sums = aa122d8ddc862a1cc40110cf2744a326ad0c717c0abe34578a22af5425a6c72d
+	source = alizy::git+https://github.com/jonios/alizy.git#tag=v0.2.1
+	sha256sums = 67db6b5c6e066d161ebf5dd640659fcb587f82cce2118718fdc2b47edf70dba5
 
 pkgname = alizyd
 	pkgdesc = Privileged service of a WireGuard client: tunnels, nftables kill switch, DNS and split tunnelling
@@ -32,7 +32,7 @@ pkgname = alizyd
 
 pkgname = alizy
 	pkgdesc = WireGuard desktop client with an OS-level nftables kill switch (unprivileged GUI)
-	depends = alizyd=0.1.0
+	depends = alizyd=0.2.1
 	depends = cairo
 	depends = dbus
 	depends = gdk-pixbuf2
