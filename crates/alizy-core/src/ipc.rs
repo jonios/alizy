@@ -57,6 +57,12 @@ pub enum Command {
     TestRoute {
         query: String,
     },
+    /// LAN forward proxy: read its state (running, port, addresses).
+    GetLanProxy,
+    /// Start/stop the LAN forward proxy (validated, persisted, re-applied).
+    SetLanProxy {
+        config: LanProxyConfig,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,6 +129,72 @@ pub struct KillSwitchStatus {
     pub firewall_tag: Option<String>,
 }
 
+/// LAN forward proxy configuration: devices on the local network (a smart
+/// TV, a console) reach the internet through this machine's tunnel. Phase A
+/// has no authentication — see LAN_PROXY.md.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LanProxyConfig {
+    pub enabled: bool,
+    pub port: u16,
+    #[serde(default = "default_socks_port")]
+    pub socks_port: u16,
+}
+
+fn default_socks_port() -> u16 {
+    1080
+}
+
+impl Default for LanProxyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: 8080,
+            socks_port: 1080,
+        }
+    }
+}
+
+impl LanProxyConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.port == 0 {
+            return Err("HTTP proxy port must be between 1 and 65535".into());
+        }
+        if self.socks_port == 0 {
+            return Err("SOCKS5 proxy port must be between 1 and 65535".into());
+        }
+        if self.port == self.socks_port {
+            return Err("HTTP and SOCKS5 ports must be different".into());
+        }
+        Ok(())
+    }
+}
+
+/// What the daemon reports about the LAN proxy.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LanProxyStatus {
+    pub enabled: bool,
+    /// Configured HTTP proxy port; 0 only in the default (never configured) status.
+    pub port: u16,
+    /// Configured SOCKS5 proxy port.
+    #[serde(default)]
+    pub socks_port: u16,
+    /// IPv4 addresses other devices can reach the proxy on (loopback and the
+    /// tunnel interface excluded). Refreshed on apply and on network changes.
+    pub addresses: Vec<std::net::IpAddr>,
+    /// Set when the HTTP listener could not be started (port in use, permission).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Whether the HTTP listener is actually accepting connections right now.
+    #[serde(default)]
+    pub listening: bool,
+    /// Set when the SOCKS5 listener could not be started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socks_error: Option<String>,
+    /// Whether the SOCKS5 listener is accepting connections right now.
+    #[serde(default)]
+    pub socks_listening: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonStatus {
     pub state: ConnectionState,
@@ -145,6 +217,9 @@ pub struct DaemonStatus {
     /// `"ssh"` for SSH tunnels; absent for WireGuard.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tunnel_kind: Option<String>,
+    /// LAN forward proxy (share this machine's VPN with other devices).
+    #[serde(default)]
+    pub lan_proxy: LanProxyStatus,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,6 +260,7 @@ pub enum Payload {
     System(Box<crate::sysprobe::SystemReport>),
     Split(Box<SplitStatus>),
     RouteTest(Box<RouteTest>),
+    LanProxy(LanProxyStatus),
     Ok,
 }
 
@@ -213,6 +289,35 @@ mod tests {
     #[test]
     fn unknown_commands_are_rejected() {
         assert!(serde_json::from_str::<Request>(r#"{"id":1,"cmd":"exec","argv":["sh"]}"#).is_err());
+    }
+
+    #[test]
+    fn lan_proxy_command_wire_format() {
+        let c = Command::SetLanProxy {
+            config: LanProxyConfig {
+                enabled: true,
+                port: 8080,
+                socks_port: 1080,
+            },
+        };
+        let s = serde_json::to_string(&c).unwrap();
+        assert_eq!(s, r#"{"cmd":"set_lan_proxy","config":{"enabled":true,"port":8080,"socks_port":1080}}"#);
+        let back: Command = serde_json::from_str(&s).unwrap();
+        assert!(matches!(back, Command::SetLanProxy { config } if config.enabled && config.port == 8080 && config.socks_port == 1080));
+        assert!(matches!(
+            serde_json::from_str::<Request>(r#"{"id":2,"cmd":"get_lan_proxy"}"#)
+                .unwrap()
+                .command,
+            Command::GetLanProxy
+        ));
+    }
+
+    #[test]
+    fn lan_proxy_status_tolerates_a_missing_error_field() {
+        let s: LanProxyStatus = serde_json::from_str(r#"{"enabled":true,"port":9090,"addresses":[]}"#).unwrap();
+        assert!(s.enabled);
+        assert_eq!(s.port, 9090);
+        assert_eq!(LanProxyStatus::default().port, 0);
     }
 }
 

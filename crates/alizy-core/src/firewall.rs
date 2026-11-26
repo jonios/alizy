@@ -99,6 +99,13 @@ pub struct FirewallPlan {
     /// Split-tunnel bypass ranges (already filtered by enabled families).
     #[serde(default)]
     pub direct: DirectSets,
+    /// TCP source port of the HTTP LAN proxy. Its replies to LAN clients must
+    /// pass the kill switch even when `allow_lan` is off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lan_proxy_port: Option<u16>,
+    /// TCP source port of the SOCKS5 LAN proxy (same rationale as HTTP).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lan_socks_port: Option<u16>,
 }
 
 impl FirewallPlan {
@@ -121,7 +128,21 @@ impl FirewallPlan {
             ipv6_enabled: policy.ipv6_enabled,
             dns_leak_protection: policy.dns_leak_protection,
             tunnel,
+            lan_proxy_port: None,
+            lan_socks_port: None,
         }
+    }
+
+    /// Allow the LAN proxy's replies to reach the devices that asked for
+    /// them, independently of `allow_lan`.
+    pub fn with_lan_proxy(mut self, port: Option<u16>) -> Self {
+        self.lan_proxy_port = port.filter(|_| self.kill_switch);
+        self
+    }
+
+    pub fn with_lan_socks(mut self, port: Option<u16>) -> Self {
+        self.lan_socks_port = port.filter(|_| self.kill_switch);
+        self
     }
 
     /// Whether any rule needs to be installed at all.
@@ -346,6 +367,26 @@ impl FirewallPlan {
             let _ = writeln!(s, "    oifname \"{iface}\" accept");
         }
         if self.kill_switch {
+            if let Some(port) = self.lan_proxy_port {
+                let _ = writeln!(
+                    s,
+                    "    tcp sport {port} ip daddr {{ {LAN_V4} }} accept comment \"lan-proxy\""
+                );
+                let _ = writeln!(
+                    s,
+                    "    tcp sport {port} ip6 daddr {{ {LAN_V6} }} accept comment \"lan-proxy\""
+                );
+            }
+            if let Some(port) = self.lan_socks_port {
+                let _ = writeln!(
+                    s,
+                    "    tcp sport {port} ip daddr {{ {LAN_V4} }} accept comment \"lan-socks\""
+                );
+                let _ = writeln!(
+                    s,
+                    "    tcp sport {port} ip6 daddr {{ {LAN_V6} }} accept comment \"lan-socks\""
+                );
+            }
             if self.has_direct() {
                 s.push_str("    ip daddr @direct4 accept comment \"split-direct\"\n");
                 s.push_str("    ip6 daddr @direct6 accept comment \"split-direct\"\n");
@@ -490,6 +531,40 @@ mod tests {
         let tun = pos("    oifname \"alizy0\" accept");
         let drop = pos("kill-switch\"");
         assert!(lo < ep4 && ep4 < ep6 && ep6 < dns && dns < tun && tun < drop);
+    }
+
+    #[test]
+    fn lan_proxy_replies_pass_the_kill_switch() {
+        // `allow_lan` off: the proxy's own replies must still reach the LAN.
+        let p = NetworkPolicy {
+            kill_switch: true,
+            allow_lan: false,
+            ..Default::default()
+        };
+        let r = FirewallPlan::new(&p, tunnel()).with_lan_proxy(Some(8080)).render();
+        let dns = pos(&r, "oifname != \"alizy0\" udp dport { 53, 853 }");
+        let v4 = pos(
+            &r,
+            "tcp sport 8080 ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16,",
+        );
+        let v6 = pos(&r, "tcp sport 8080 ip6 daddr { fe80::/10, fc00::/7, ff00::/8 }");
+        let drop = pos(&r, "kill-switch\"");
+        // After the DNS-leak rejects, before the final reject: replies pass,
+        // DNS still cannot bypass.
+        assert!(dns < v4 && v4 < drop && v6 < drop, "{r}");
+        // Without a listener there is no rule at all.
+        let plan = FirewallPlan::new(&p, tunnel());
+        assert!(!plan.render().contains("lan-proxy"));
+        // The rule does not depend on `allow_lan` (it exists for the off case).
+        let lan_ok = FirewallPlan::new(&policy(true), tunnel())
+            .with_lan_proxy(Some(8080))
+            .render();
+        assert!(lan_ok.contains("tcp sport 8080 ip daddr {"));
+        // Kill switch off: the output chain accepts everything anyway.
+        let no_ks = FirewallPlan::new(&policy(false), tunnel())
+            .with_lan_proxy(Some(8080))
+            .render();
+        assert!(!no_ks.contains("lan-proxy"));
     }
 
     #[test]

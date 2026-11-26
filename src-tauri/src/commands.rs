@@ -6,7 +6,9 @@ use crate::daemon_client::CallError;
 use crate::state::{AppSettings, AppState, SETTINGS_KEY};
 use alizy_core::firewall::NetworkPolicy;
 use alizy_core::ipc::ErrorCode;
-use alizy_core::ipc::{Command, DaemonStatus, Payload, RouteTest, SplitStatus, TunnelSpec};
+use alizy_core::ipc::{
+    Command, DaemonStatus, LanProxyConfig, LanProxyStatus, Payload, RouteTest, SplitStatus, TunnelSpec,
+};
 use alizy_core::routing::compatibility_warnings;
 use alizy_core::split::{import_rules, Action, ImportResult, SplitConfig};
 use alizy_core::ssh::{HostKey, SshPublic};
@@ -922,6 +924,32 @@ pub async fn route_test(st: S<'_>, query: String) -> R<RouteTest> {
         Payload::RouteTest(r) => Ok(*r),
         _ => Err("unexpected reply".into()),
     }
+}
+
+// ───────────────────────────── LAN forward proxy ─────────────────────────────
+
+#[tauri::command]
+pub async fn lan_proxy_get(st: S<'_>) -> R<LanProxyStatus> {
+    match st.daemon.quick(Command::GetLanProxy).await? {
+        Payload::LanProxy(s) => Ok(s),
+        _ => Err("unexpected reply".into()),
+    }
+}
+
+#[tauri::command]
+pub async fn lan_proxy_set(st: S<'_>, config: LanProxyConfig) -> R<LanProxyStatus> {
+    config.validate().map_err(e)?;
+    let status = match st
+        .daemon
+        .call(Command::SetLanProxy { config }, Duration::from_secs(15))
+        .await?
+    {
+        Payload::LanProxy(s) => s,
+        _ => return Err("unexpected reply".into()),
+    };
+    // A failed listener start is reported in the status, not as an error:
+    // the UI shows `error` next to the (still enabled) setting.
+    Ok(status)
 }
 
 pub fn show_main(app: &AppHandle) {

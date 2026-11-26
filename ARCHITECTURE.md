@@ -63,6 +63,7 @@ without root and without Tauri.
 | statistics_manager | `alizy-store::history`, `src-tauri/src/poller.rs` |
 | logging_manager | `tracing` in both processes, `alizy-store::db` events table (redacted), Logs screen |
 | split tunnelling (rules, precedence, compile) | `alizy-core::split` |
+| LAN forward proxy (share the tunnel with other devices) | `alizy-core::ipc` (config/status), `alizy-core::firewall` (`lan_proxy_port` reply rule), `alizyd::lan_proxy` (listener), `alizyd::engine` (`set_lan_proxy`), `src-tauri` `lan_proxy_get`/`lan_proxy_set`, Settings → Network |
 | domain resolution engine | `alizy-core::dnswire` (codec), `alizyd::resolver` (I/O, TTL cache) |
 | Linux distribution / capability detection | `alizy-core::sysprobe` (`alizyd --probe`, Settings → System Check) |
 

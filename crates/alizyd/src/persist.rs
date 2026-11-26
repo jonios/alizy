@@ -3,6 +3,7 @@
 
 use crate::resolver::Cache;
 use alizy_core::firewall::NetworkPolicy;
+use alizy_core::ipc::LanProxyConfig;
 use alizy_core::split::SplitConfig;
 use serde::{Deserialize, Serialize};
 use std::os::unix::fs::PermissionsExt;
@@ -15,6 +16,9 @@ pub struct PersistedState {
     pub policy: NetworkPolicy,
     pub split: SplitConfig,
     pub dns_cache: Cache,
+    /// LAN forward proxy (share this machine's VPN with other devices).
+    #[serde(default)]
+    pub lan_proxy: LanProxyConfig,
     /// Last successfully resolved address for each hostname endpoint
     /// ("host:port"). Used when DNS is unavailable — notably while the kill
     /// switch blocks everything and no tunnel exists yet.
@@ -68,5 +72,42 @@ impl Persist {
         std::fs::write(&tmp, data).map_err(|e| e.to_string())?;
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
         std::fs::rename(&tmp, &self.path).map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lan_proxy_survives_a_save_load_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = Persist::new(dir.path()).unwrap();
+        let s = PersistedState {
+            lan_proxy: LanProxyConfig {
+                enabled: true,
+                port: 9090,
+                socks_port: 1080,
+            },
+            ..Default::default()
+        };
+        p.save(&s).unwrap();
+        assert_eq!(p.load().lan_proxy, s.lan_proxy);
+    }
+
+    #[test]
+    fn a_state_file_without_lan_proxy_still_loads() {
+        // Written by an older daemon: no lan_proxy field at all.
+        let dir = tempfile::tempdir().unwrap();
+        let p = Persist::new(dir.path()).unwrap();
+        std::fs::write(
+            dir.path().join("state.json"),
+            r#"{"version":1,"policy":{"kill_switch":true}}"#,
+        )
+        .unwrap();
+        let s = p.load();
+        assert!(s.policy.kill_switch);
+        assert_eq!(s.lan_proxy, LanProxyConfig::default());
+        assert!(!s.lan_proxy.enabled);
     }
 }

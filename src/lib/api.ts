@@ -8,6 +8,8 @@ import type {
   DaemonStatus,
   HistoryEntry,
   ImportReport,
+  LanProxyConfig,
+  LanProxyStatus,
   LogEntry,
   LogQuery,
   NetworkPolicy,
@@ -81,6 +83,10 @@ export const api = {
     invoke<SplitImportResult>("split_parse_import", { text, defaultAction }),
   splitExport: (path: string) => invoke<number>("split_export", { path }),
   routeTest: (query: string) => invoke<RouteTest>("route_test", { query }),
+
+  // LAN forward proxy (share this machine's VPN with other devices)
+  lanProxyGet: () => invoke<LanProxyStatus>("lan_proxy_get"),
+  lanProxySet: (config: LanProxyConfig) => invoke<LanProxyStatus>("lan_proxy_set", { config }),
 
   // window / lifecycle
   quitUi: () => invoke<void>("quit_ui"),

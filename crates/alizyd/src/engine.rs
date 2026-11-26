@@ -6,6 +6,8 @@
 
 use crate::cancel::{CancelSource, CancelToken};
 use crate::events::Events;
+use crate::lan_proxy::LanProxy;
+use crate::lan_socks::LanSocks;
 use crate::linux::ssh::{self as sshb, SshError, SshUp};
 use crate::linux::{firewall, LinuxAdapter};
 use crate::persist::{Persist, PersistedState};
@@ -13,8 +15,8 @@ use crate::resolver::{now, Resolver};
 use alizy_core::config::{Host, PublicConfig};
 use alizy_core::firewall::{FirewallPlan, NetworkPolicy, TunnelRules, SPLIT_MARK};
 use alizy_core::ipc::{
-    DaemonStatus, ErrorCode, EventCategory as Cat, EventLevel as Lvl, IpcError, KillSwitchStatus, RouteTest,
-    RouteTestEntry, SplitStatus, TunnelSpec, TunnelStats,
+    DaemonStatus, ErrorCode, EventCategory as Cat, EventLevel as Lvl, IpcError, KillSwitchStatus, LanProxyConfig,
+    LanProxyStatus, RouteTest, RouteTestEntry, SplitStatus, TunnelSpec, TunnelStats,
 };
 use alizy_core::platform::PlatformAdapter;
 use alizy_core::routing::{
@@ -152,6 +154,8 @@ struct Inner {
     split_rule_installed: bool,
     reconnect_attempt: u32,
     next_reconnect: u64,
+    /// Published LAN proxy state (config, addresses, start errors).
+    lan: LanProxyStatus,
 }
 
 pub struct Engine<A = LinuxAdapter> {
@@ -166,6 +170,11 @@ pub struct Engine<A = LinuxAdapter> {
     /// `disconnect`/`connect` bump it *before* waiting for the lock.
     cancel: CancelSource,
     inner: Mutex<Inner>,
+    /// The HTTP LAN proxy listener; `None` while disabled or failed.
+    /// Never held while locking `inner` (order is always inner → lan).
+    lan: Mutex<Option<LanProxy>>,
+    /// The SOCKS5 LAN proxy listener.
+    lan_socks: Mutex<Option<LanSocks>>,
     pub events: Events,
     persist: Persist,
     resolver: Resolver,
@@ -202,6 +211,7 @@ impl<A: Backend> Engine<A> {
                 .unwrap_or(alizy_core::sysprobe::DnsBackend::ResolvConfFile),
             daemon_started: now(),
             tunnel_kind: None,
+            lan_proxy: LanProxyStatus::default(),
         };
         let (status_tx, _) = watch::channel(initial);
         let engine = Arc::new(Self {
@@ -223,14 +233,24 @@ impl<A: Backend> Engine<A> {
                 split_rule_installed: true, // force cleanup of leftovers on first sync
                 reconnect_attempt: 0,
                 next_reconnect: 0,
+                lan: LanProxyStatus::default(),
             }),
             events: Events::default(),
+            lan: Mutex::new(None),
+            lan_socks: Mutex::new(None),
             persist,
             resolver,
             iface,
             status_tx,
         });
         engine.recover().await;
+        // The firewall already carries the persisted proxy port (recover
+        // enforced it); now open the listener it belongs to.
+        {
+            let mut inner = engine.inner.lock().await;
+            engine.apply_lan(&mut inner).await;
+            engine.publish(&inner);
+        }
         engine
     }
 
@@ -315,6 +335,7 @@ impl<A: Backend> Engine<A> {
             daemon_started: self.started_at,
             // Absent for WireGuard so its status JSON is unchanged.
             tunnel_kind: a.filter(|a| a.kind == TunnelKind::Ssh).map(|_| "ssh".to_string()),
+            lan_proxy: inner.lan.clone(),
         };
         self.status_tx.send_replace(s);
     }
@@ -354,7 +375,12 @@ impl<A: Backend> Engine<A> {
         } else {
             Default::default()
         };
+        let lan_cfg = &inner.persisted.lan_proxy;
+        let lan_proxy = lan_cfg.enabled.then_some(lan_cfg.port);
+        let lan_socks = lan_cfg.enabled.then_some(lan_cfg.socks_port);
         FirewallPlan::with_split(policy, tunnel, direct)
+            .with_lan_proxy(lan_proxy)
+            .with_lan_socks(lan_socks)
     }
 
     /// Apply the desired firewall atomically and verify it in the kernel.
@@ -555,6 +581,10 @@ impl<A: Backend> Engine<A> {
         self.adapter
             .tunnel_up(&self.iface, &spec.config, &endpoints, &routes, &dns)
             .await?;
+        // tunnel_up tears down the old interface (and its routing rules) before
+        // creating the new one, so the split rule enforce() just installed is
+        // gone — reset the flag so sync re-adds it.
+        inner.split_rule_installed = false;
         self.sync_split_rule(inner).await;
         inner.last_error = None;
         inner.reconnect_attempt = 0;
@@ -684,6 +714,9 @@ impl<A: Backend> Engine<A> {
                 cancel: cancel.clone(),
             })
             .await?;
+        // ssh_up tears down the previous interface (and its routing rules),
+        // so the split rule enforce() installed above is gone.
+        inner.split_rule_installed = false;
         self.sync_split_rule(inner).await;
         inner.last_error = None;
         inner.reconnect_attempt = 0;
@@ -881,6 +914,114 @@ impl<A: Backend> Engine<A> {
         }
         self.publish(&inner);
         r.map_err(|e| err(ErrorCode::Firewall, e))
+    }
+
+    /// Published LAN proxy state.
+    pub async fn lan_proxy_status(&self) -> LanProxyStatus {
+        self.inner.lock().await.lan.clone()
+    }
+
+    /// Apply a LAN proxy configuration: persist it, re-render the firewall
+    /// (its reply exception is part of the plan) and (re)start the listener.
+    /// Lock order is inner → lan, never the other way round.
+    pub async fn set_lan_proxy(&self, cfg: LanProxyConfig) -> Result<LanProxyStatus, IpcError> {
+        cfg.validate().map_err(|e| err(ErrorCode::BadRequest, e))?;
+        let mut inner = self.inner.lock().await;
+        inner.persisted.lan_proxy = cfg;
+        self.save(&inner);
+        let r = self.enforce(&mut inner).await;
+        self.apply_lan(&mut inner).await;
+        self.publish(&inner);
+        let status = inner.lan.clone();
+        drop(inner);
+        r.map_err(|e| err(ErrorCode::Firewall, e))?;
+        Ok(status)
+    }
+
+    /// Start or stop the listener to match `inner.persisted.lan_proxy` and
+    /// record the outcome in `inner.lan`. `inner` must be held. `enabled`
+    /// is the setting; `listening` says whether the listener is actually up
+    /// (a bind failure leaves it false with `error` set, while the setting
+    /// stays persisted for retry).
+    async fn apply_lan(&self, inner: &mut Inner) {
+        let cfg = inner.persisted.lan_proxy.clone();
+        let was_http = inner.lan.listening;
+        let was_socks = inner.lan.socks_listening;
+        let mut status = LanProxyStatus {
+            enabled: cfg.enabled,
+            port: cfg.port,
+            socks_port: cfg.socks_port,
+            addresses: Vec::new(),
+            error: None,
+            listening: false,
+            socks_error: None,
+            socks_listening: false,
+        };
+        // Stop the previous listeners first (waiting for sockets to close)
+        // so a port change frees the old port immediately.
+        let prev = self.lan.lock().await.take();
+        if let Some(p) = prev {
+            p.stop().await;
+        }
+        let prev_socks = self.lan_socks.lock().await.take();
+        if let Some(p) = prev_socks {
+            p.stop().await;
+        }
+        if cfg.enabled {
+            // HTTP proxy
+            match LanProxy::start(cfg.port).await {
+                Ok(p) => {
+                    status.listening = true;
+                    *self.lan.lock().await = Some(p);
+                }
+                Err(e) => {
+                    status.error = Some(e.to_string());
+                    self.events
+                        .push(Lvl::Error, Cat::Network, format!("LAN HTTP proxy could not start: {e}"));
+                }
+            }
+            // SOCKS5 proxy
+            match LanSocks::start(cfg.socks_port).await {
+                Ok(p) => {
+                    status.socks_listening = true;
+                    *self.lan_socks.lock().await = Some(p);
+                }
+                Err(e) => {
+                    status.socks_error = Some(e.to_string());
+                    self.events
+                        .push(Lvl::Error, Cat::Network, format!("LAN SOCKS5 proxy could not start: {e}"));
+                }
+            }
+            if status.listening || status.socks_listening {
+                status.addresses = crate::lan_proxy::addresses(&self.iface).await;
+                let addrs = status
+                    .addresses
+                    .iter()
+                    .map(|a| a.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let mut parts = Vec::new();
+                if status.listening {
+                    parts.push(format!("HTTP :{}", cfg.port));
+                }
+                if status.socks_listening {
+                    parts.push(format!("SOCKS5 :{}", cfg.socks_port));
+                }
+                let where_ = if addrs.is_empty() {
+                    parts.join(", ")
+                } else {
+                    format!("{addrs} ({})", parts.join(", "))
+                };
+                self.events.push(
+                    Lvl::Info,
+                    Cat::Network,
+                    format!("LAN proxy listening on {where_}; anyone on this network can use it (no password)."),
+                );
+            }
+        } else if was_http || was_socks {
+            self.events.push(Lvl::Info, Cat::Network, "LAN proxy stopped.");
+        }
+        inner.lan = status;
     }
 
     pub async fn set_split(&self, mut cfg: SplitConfig) -> Result<(), IpcError> {
@@ -1245,6 +1386,11 @@ impl<A: Backend> Engine<A> {
         let mut inner = self.inner.lock().await;
         self.events
             .push(Lvl::Info, Cat::Network, format!("Network change detected: {what}"));
+        // The addresses other devices reach the proxy on may have changed.
+        if inner.lan.listening {
+            inner.lan.addresses = crate::lan_proxy::addresses(&self.iface).await;
+            self.publish(&inner);
+        }
         // Re-resolve split domains soon: answers may differ on the new network.
         for e in inner.persisted.dns_cache.entries.values_mut() {
             e.next_refresh = e.next_refresh.min(now() + 2);
@@ -1414,6 +1560,10 @@ impl<A: Backend> Engine<A> {
 
     /// Orderly stop (SIGTERM): remove the tunnel; leave kill-switch protection in place.
     pub async fn shutdown(&self) {
+        // Stop accepting LAN clients before tearing anything down; the
+        // persisted setting brings the listener back on the next start.
+        self.lan.lock().await.take();
+        self.lan_socks.lock().await.take();
         let mut inner = self.inner.lock().await;
         if inner.active.is_some() {
             let _ = self.adapter.tunnel_down(&self.iface).await;
@@ -1478,10 +1628,25 @@ mod tests {
     use alizy_core::ssh::{HostKey, SshConfig, SshPublic};
     use alizy_core::sysprobe::DnsBackend;
     use std::path::PathBuf;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use zeroize::Zeroizing;
 
     const KEY: &str = "AAAAC3NzaC1lZDI1NTE5AAAAICJ9AyQ1/Hf8ky/h28JhISjg1GkKGhTejR6j6uTwPF1l";
     const SSH_UID: u32 = 60123;
+
+    /// A port nothing is listening on (released before use).
+    fn free_port() -> u16 {
+        let l = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+        l.local_addr().unwrap().port()
+    }
+
+    /// Two distinct free ports (held simultaneously so the kernel can't hand
+    /// back the same one twice).
+    fn two_free_ports() -> (u16, u16) {
+        let a = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+        let b = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+        (a.local_addr().unwrap().port(), b.local_addr().unwrap().port())
+    }
 
     #[derive(Default)]
     struct FakeState {
@@ -2071,5 +2236,100 @@ mod tests {
         t.fake().with(|s| s.missing = vec![Dependency::OpenSsh]);
         let r = t.engine.system_report().await.unwrap();
         assert_eq!(r.ssh_ready, r.ssh_missing.is_empty());
+    }
+
+    #[tokio::test]
+    async fn lan_proxy_starts_stops_and_reaches_the_firewall() {
+        let t = engine(true).await; // kill switch on: the reply exception matters
+                                    // Off by default, and the plan carries no proxy rule.
+        assert!(!t.engine.lan_proxy_status().await.enabled);
+        assert!(t.fake().with(|s| s.applied.last().unwrap().lan_proxy_port.is_none()));
+
+        let (port, socks_port) = two_free_ports();
+        let st = t
+            .engine
+            .set_lan_proxy(LanProxyConfig { enabled: true, port, socks_port })
+            .await
+            .unwrap();
+        assert!(
+            st.enabled && st.listening && st.port == port && st.error.is_none()
+                && st.socks_listening && st.socks_port == socks_port && st.socks_error.is_none(),
+            "{st:?}"
+        );
+        // The HTTP listener is really up.
+        let mut c = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        c.write_all(b"GET / HTTP/1.1\r\n\r\n").await.unwrap();
+        let mut resp = String::new();
+        c.read_to_string(&mut resp).await.unwrap();
+        assert!(resp.starts_with("HTTP/1.1 400"), "{resp}");
+        // The SOCKS5 listener is really up: a non-SOCKS greeting gets closed.
+        let mut s = tokio::net::TcpStream::connect(("127.0.0.1", socks_port)).await.unwrap();
+        s.write_all(&[5, 1, 0]).await.unwrap(); // greeting
+        let mut g = [0u8; 2];
+        s.read_exact(&mut g).await.unwrap();
+        assert_eq!(g, [5, 0]);
+        // The firewall plan now carries both reply exceptions.
+        assert_eq!(t.fake().with(|s| s.applied.last().unwrap().lan_proxy_port), Some(port));
+        assert_eq!(t.fake().with(|s| s.applied.last().unwrap().lan_socks_port), Some(socks_port));
+        // Persisted: a fresh engine over the same state would come back on.
+        let persisted = t.engine.inner.lock().await.persisted.lan_proxy.clone();
+        assert_eq!(persisted, LanProxyConfig { enabled: true, port, socks_port });
+
+        // Disable: listeners gone (ports reusable) and no rules in the plan.
+        t.engine
+            .set_lan_proxy(LanProxyConfig { enabled: false, port, socks_port })
+            .await
+            .unwrap();
+        assert!(tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_err());
+        assert!(tokio::net::TcpStream::connect(("127.0.0.1", socks_port)).await.is_err());
+        assert!(t.fake().with(|s| s.applied.last().unwrap().lan_proxy_port.is_none()));
+        assert!(t.fake().with(|s| s.applied.last().unwrap().lan_socks_port.is_none()));
+        let st = t.engine.lan_proxy_status().await;
+        assert!(!st.enabled && !st.listening && !st.socks_listening, "{st:?}");
+    }
+
+    #[tokio::test]
+    async fn lan_proxy_bind_failure_is_reported_not_raised() {
+        let t = engine(false).await;
+        let taken = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+        let port = taken.local_addr().unwrap().port();
+        let socks_port = free_port();
+        let st = t
+            .engine
+            .set_lan_proxy(LanProxyConfig { enabled: true, port, socks_port })
+            .await
+            .unwrap();
+        assert!(st.enabled && !st.listening, "{st:?}");
+        let err = st.error.expect("bind error");
+        assert!(err.contains("already in use"), "{err}");
+        assert!(t.engine.inner.lock().await.persisted.lan_proxy.enabled);
+        drop(taken);
+        let st = t
+            .engine
+            .set_lan_proxy(LanProxyConfig { enabled: true, port, socks_port })
+            .await
+            .unwrap();
+        assert!(st.error.is_none(), "{st:?}");
+        assert!(st.enabled && st.listening, "{st:?}");
+    }
+
+    #[tokio::test]
+    async fn lan_proxy_port_is_validated_and_needs_no_tunnel() {
+        let t = engine(false).await;
+        let e = t
+            .engine
+            .set_lan_proxy(LanProxyConfig { enabled: true, port: 0, socks_port: 1080 })
+            .await
+            .unwrap_err();
+        assert!(e.message.contains("port"), "{e:?}");
+        let port = free_port();
+        let socks_port = free_port();
+        let st = t
+            .engine
+            .set_lan_proxy(LanProxyConfig { enabled: true, port, socks_port })
+            .await
+            .unwrap();
+        assert!(st.enabled && st.listening && st.error.is_none(), "{st:?}");
+        assert_eq!(t.state().await, ConnectionState::Disconnected);
     }
 }

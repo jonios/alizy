@@ -15,6 +15,9 @@ mod events;
 #[cfg(target_os = "linux")]
 mod exec;
 #[cfg(target_os = "linux")]
+mod lan_proxy;
+mod lan_socks;
+#[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
 mod persist;

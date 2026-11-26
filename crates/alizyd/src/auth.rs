@@ -50,6 +50,7 @@ pub fn is_privileged(c: &Command) -> bool {
             | Command::Disconnect
             | Command::SetPolicy { .. }
             | Command::SetSplit { .. }
+            | Command::SetLanProxy { .. }
             | Command::TestRoute { .. }
     )
 }

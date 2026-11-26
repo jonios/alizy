@@ -68,6 +68,35 @@ export interface DaemonStatus {
   dns_backend: DnsBackend;
   /** "wireguard" | "ssh" while a tunnel is up, else null/absent. */
   tunnel_kind?: string | null;
+  /** LAN forward proxy (share this machine's VPN with other devices). */
+  lan_proxy?: LanProxyStatus;
+}
+
+/** LAN forward proxy configuration: devices on the local network reach the
+ * internet through this machine's tunnel. Phase A has no authentication. */
+export interface LanProxyConfig {
+  enabled: boolean;
+  port: number;
+  socks_port: number;
+}
+
+/** What the daemon reports about the LAN proxy. */
+export interface LanProxyStatus {
+  enabled: boolean;
+  /** Configured HTTP proxy port; 0 only in the default (never configured) status. */
+  port: number;
+  /** Configured SOCKS5 proxy port. */
+  socks_port: number;
+  /** IPv4 addresses other devices can reach the proxy on. */
+  addresses: string[];
+  /** Set when the HTTP listener could not be started. */
+  error?: string | null;
+  /** Whether the HTTP listener is accepting connections right now. */
+  listening: boolean;
+  /** Set when the SOCKS5 listener could not be started. */
+  socks_error?: string | null;
+  /** Whether the SOCKS5 listener is accepting connections right now. */
+  socks_listening: boolean;
 }
 
 /** Emitted on "alizy://status" about once per second. */

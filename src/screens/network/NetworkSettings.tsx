@@ -1,5 +1,5 @@
-import { Check, CircleAlert, Network, Plus, RefreshCw, Router, ShieldAlert, ShieldCheck, ShieldOff, Wifi, X } from "lucide-react";
-import { useState } from "react";
+import { Cast, Check, CircleAlert, Network, Plus, RefreshCw, Router, ShieldAlert, ShieldCheck, ShieldOff, Wifi, X } from "lucide-react";
+import { useEffect, useState } from "react";
 import { ScreenBody, ScreenHeader } from "../../components/ScreenHeader";
 import { Card, CardHeader } from "../../components/ui/card";
 import { Switch } from "../../components/ui/switch";
@@ -12,8 +12,10 @@ import { EmptyState } from "../../components/ui/empty-state";
 import { ConfirmDialog } from "../../components/ui/dialog";
 import { Divider, SettingRow } from "../../components/ui/misc";
 import { Tooltip } from "../../components/ui/tooltip";
-import type { NetworkPolicy } from "../../lib/types";
+import type { LanProxyConfig, LanProxyStatus, NetworkPolicy } from "../../lib/types";
+import { api } from "../../lib/api";
 import { isIP } from "../../lib/validate";
+import { toast } from "../../store/toast";
 import { usePolicy } from "../../store/policy";
 import { useStatus } from "../../store/status";
 import { useSettings } from "../../store/settings";
@@ -179,6 +181,9 @@ export function NetworkSettings() {
               <Divider className="mx-5" />
               <AutoConnect />
             </Card>
+
+            {/* LAN forward proxy */}
+            <LanProxyCard />
           </>
         )}
       </ScreenBody>
@@ -295,6 +300,192 @@ function DnsEditor({ value, onChange, disabled }: { value: string[]; onChange: (
         </Button>
       </form>
     </div>
+  );
+}
+
+/** Share this machine's VPN with other devices on the LAN (phase A: no auth). */
+function LanProxyCard() {
+  const polled = useStatus((s) => s.status?.lan_proxy ?? null);
+  const [saving, setSaving] = useState(false);
+  const [portDraft, setPortDraft] = useState<string | null>(null);
+  const [socksPortDraft, setSocksPortDraft] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [mine, setMine] = useState<LanProxyStatus | null>(null);
+  const lan = mine ?? polled;
+  useEffect(() => {
+    if (
+      mine &&
+      polled &&
+      polled.enabled === mine.enabled &&
+      polled.port === mine.port &&
+      polled.socks_port === mine.socks_port &&
+      polled.listening === mine.listening &&
+      polled.socks_listening === mine.socks_listening
+    ) {
+      setMine(null);
+    }
+  }, [mine, polled]);
+
+  const enabled = lan?.enabled ?? false;
+  const port = lan?.port || 8080;
+  const socksPort = lan?.socks_port || 1080;
+  const shownPort = portDraft ?? String(port);
+  const shownSocksPort = socksPortDraft ?? String(socksPort);
+  const portNum = Number(shownPort);
+  const socksPortNum = Number(shownSocksPort);
+  const portInvalid = !/^\d{1,5}$/.test(shownPort.trim()) || portNum < 1 || portNum > 65535;
+  const socksPortInvalid = !/^\d{1,5}$/.test(shownSocksPort.trim()) || socksPortNum < 1 || socksPortNum > 65535;
+
+  const apply = async (config: LanProxyConfig) => {
+    setSaving(true);
+    setError(null);
+    try {
+      const next = await api.lanProxySet(config);
+      setMine(next);
+      if (next.error) setError(next.error);
+      if (next.socks_error) setError((prev) => (prev ? `${prev}; ${next.socks_error}` : next.socks_error!) as string);
+      setPortDraft(null);
+      setSocksPortDraft(null);
+    } catch (e) {
+      setError(typeof e === "string" ? e : String(e));
+      toast.error("Couldn’t change the LAN proxy", e);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const commitPort = () => {
+    if (portDraft === null || portInvalid || portNum === port) {
+      setPortDraft(null);
+      return;
+    }
+    void apply({ enabled, port: portNum, socks_port: socksPortInvalid ? socksPort : socksPortNum });
+  };
+
+  const commitSocksPort = () => {
+    if (socksPortDraft === null || socksPortInvalid || socksPortNum === socksPort) {
+      setSocksPortDraft(null);
+      return;
+    }
+    void apply({ enabled, port: portInvalid ? port : portNum, socks_port: socksPortNum });
+  };
+
+  return (
+    <Card className="overflow-hidden">
+      <CardHeader
+        icon={<Cast />}
+        title="Share VPN with other devices"
+        description="Run a proxy on this computer so a smart TV, console or any other device on your Wi-Fi can browse through Alizy’s tunnel."
+        action={
+          <Switch
+            checked={enabled}
+            onCheckedChange={(v) => void apply({ enabled: v, port: portInvalid ? port : portNum, socks_port: socksPortInvalid ? socksPort : socksPortNum })}
+            disabled={saving}
+            aria-label="LAN proxy"
+          />
+        }
+      />
+      {enabled && (
+        <div className="flex flex-col gap-4 px-5 pb-5">
+          <Alert tone="warning" title="No password — anyone on your network can use it">
+            Every device that can reach this computer on the local network can browse through your VPN, for free. Turn the proxy off when you
+            don’t need it.
+          </Alert>
+          {(lan?.error ?? error) && (
+            <Alert tone="danger" title="The proxy isn’t running">
+              <span className="selectable">{lan?.error ?? error}</span>
+            </Alert>
+          )}
+          {!lan?.error && !error && (lan?.listening || lan?.socks_listening) && (
+            <Alert tone="success" title="Listening">
+              {lan!.addresses.length > 0 ? (
+                <div className="flex flex-col gap-1">
+                  {lan!.listening && (
+                    <span>
+                      <b className="font-medium text-muted">HTTP proxy</b>{" "}
+                      <span className="font-mono text-xs">{lan!.addresses[0]}:{port}</span>
+                      <span className="text-faint"> — for browsers and most apps</span>
+                    </span>
+                  )}
+                  {lan!.socks_listening && (
+                    <span>
+                      <b className="font-medium text-muted">SOCKS5 proxy</b>{" "}
+                      <span className="font-mono text-xs">{lan!.addresses[0]}:{socksPort}</span>
+                      <span className="text-faint"> — for Telegram, SSH and other TCP apps</span>
+                    </span>
+                  )}
+                  {lan!.addresses.length > 1 && (
+                    <span className="text-faint text-xs mt-1">
+                      Also reachable at{" "}
+                      {lan!.addresses.slice(1).join(", ")}
+                    </span>
+                  )}
+                </div>
+              ) : (
+                <span>Listening but this computer has no address other devices can reach. Is Wi-Fi connected?</span>
+              )}
+            </Alert>
+          )}
+          {lan?.socks_error && (
+            <Alert tone="danger" title="SOCKS5 proxy isn’t running">
+              <span className="selectable">{lan.socks_error}</span>
+            </Alert>
+          )}
+          <SettingRow
+            htmlFor="lan-proxy-port"
+            title="HTTP proxy port"
+            description="For browsers and apps that support HTTP proxies."
+            control={
+              <Input
+                id="lan-proxy-port"
+                value={shownPort}
+                inputMode="numeric"
+                className="w-24 font-mono text-[13px]"
+                disabled={saving}
+                invalid={portInvalid}
+                aria-label="HTTP proxy port"
+                onChange={(e) => setPortDraft(e.target.value)}
+                onBlur={commitPort}
+                onKeyDown={(e) => e.key === "Enter" && commitPort()}
+              />
+            }
+          />
+          {portInvalid && (
+            <p className="-mt-2 flex items-center gap-1 text-xs text-danger">
+              <CircleAlert className="size-3" /> Enter a port between 1 and 65535.
+            </p>
+          )}
+          <SettingRow
+            htmlFor="lan-socks-port"
+            title="SOCKS5 proxy port"
+            description="For Telegram, SSH and other apps that need raw TCP tunnelling."
+            control={
+              <Input
+                id="lan-socks-port"
+                value={shownSocksPort}
+                inputMode="numeric"
+                className="w-24 font-mono text-[13px]"
+                disabled={saving}
+                invalid={socksPortInvalid}
+                aria-label="SOCKS5 proxy port"
+                onChange={(e) => setSocksPortDraft(e.target.value)}
+                onBlur={commitSocksPort}
+                onKeyDown={(e) => e.key === "Enter" && commitSocksPort()}
+              />
+            }
+          />
+          {socksPortInvalid && (
+            <p className="-mt-2 flex items-center gap-1 text-xs text-danger">
+              <CircleAlert className="size-3" /> Enter a port between 1 and 65535.
+            </p>
+          )}
+          <p className="text-xs leading-relaxed text-faint">
+            TCP only — apps that insist on UDP (some games, QUIC-only clients) won’t work through either proxy. The kill switch still applies to
+            this computer; only devices using a proxy get the tunnel.
+          </p>
+        </div>
+      )}
+    </Card>
   );
 }
 

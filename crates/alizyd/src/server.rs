@@ -198,6 +198,8 @@ async fn dispatch(engine: &Engine, cmd: Command) -> Result<Payload, IpcError> {
             }
             Payload::RouteTest(Box::new(engine.test_route(&query).await))
         }
+        Command::GetLanProxy => Payload::LanProxy(engine.lan_proxy_status().await),
+        Command::SetLanProxy { config } => Payload::LanProxy(engine.set_lan_proxy(config).await?),
     })
 }
 

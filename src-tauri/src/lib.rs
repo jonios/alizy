@@ -159,6 +159,8 @@ pub fn run() {
             commands::split_parse_import,
             commands::split_export,
             commands::route_test,
+            commands::lan_proxy_get,
+            commands::lan_proxy_set,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Alizy");
