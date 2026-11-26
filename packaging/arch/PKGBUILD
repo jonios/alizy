@@ -5,8 +5,8 @@
 # alizyd.install is a symlink to ../aur/alizyd.install.
 pkgbase=alizy
 pkgname=(alizyd alizy)
-pkgver=0.1.0
-pkgrel=12
+pkgver=0.2.0
+pkgrel=1
 pkgdesc="WireGuard desktop client with an OS-level nftables kill switch"
 arch=(x86_64 aarch64)
 url="https://github.com/jonios/alizy"

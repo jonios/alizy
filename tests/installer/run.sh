@@ -33,8 +33,12 @@ cleanup() { podman rm -f "$C" "$PEER" >/dev/null 2>&1; rm -rf "$WORK"; }
 trap 'cleanup; printf "\nsummary (%s): %d passed, %d failed -> %s\n" "$TAG" "$PASS" "$FAIL" "$RES"' EXIT
 
 INST=alizy-installer-x86_64
-python3 "$ROOT/tests/installer/variant.py" "$DIST/$INST" "$WORK/up" 0.1.1
-python3 "$ROOT/tests/installer/variant.py" "$DIST/$INST" "$WORK/broken" 0.1.2 --broken
+# Versions come from the installer under test; the variants are newer by suffix.
+VER=$(sed -n 's/^VERSION="\(.*\)"$/\1/p' "$DIST/$INST" | head -1)
+UP=$VER.1
+BROKEN=$VER.2
+python3 "$ROOT/tests/installer/variant.py" "$DIST/$INST" "$WORK/up" "$UP"
+python3 "$ROOT/tests/installer/variant.py" "$DIST/$INST" "$WORK/broken" "$BROKEN" --broken
 
 podman network exists $NET || podman network create $NET >/dev/null
 podman rm -f "$C" "$PEER" >/dev/null 2>&1
@@ -78,7 +82,7 @@ check "socket 0660 root:alizy, state dir 0700" R 'stat -c "%a %U:%G" /run/alizy/
 check "group alizy and user alizy-ssh created; tester added" R 'getent group alizy | grep -q tester && getent passwd alizy-ssh'
 check "AppImage and menu entry installed for the user" T 'test -x ~/Applications/Alizy.AppImage && grep -qx "Exec=\"/home/tester/Applications/Alizy.AppImage\"" ~/.local/share/applications/io.alizy.app.desktop && test -f ~/.local/share/icons/hicolor/256x256/apps/io.alizy.app.png'
 check "logout/login guidance printed" grep -q 'Log out completely' "$WORK/install.log"
-check "status works without root" T "./$INST status | tee /dev/stderr | grep -q 'installed by this installer: 0.1.0'"
+check "status works without root" T "./$INST status | tee /dev/stderr | grep -q 'installed by this installer: $VER'"
 check "group member reaches the daemon" T "$IPC hello"
 
 say "kill switch and a real tunnel"
@@ -90,12 +94,12 @@ check "real WireGuard handshake with the peer" R 'hs=$(wg show alizy0 latest-han
 monitor() { R "rm -f /tmp/mon.stop; (while [ ! -e /tmp/mon.stop ]; do nft list table inet alizy >/dev/null 2>&1 && echo 1 || echo 0; sleep 0.1; done) > /tmp/mon.txt 2>&1 &"; sleep 1; }
 monitor_end() { sleep 1; R 'touch /tmp/mon.stop; sleep 0.3; n=$(wc -l < /tmp/mon.txt); z=$(grep -c ^0 /tmp/mon.txt); echo "$n samples, table absent in $z"; [ "$n" -gt 10 ] && [ "$z" -eq 0 ]'; }
 
-say "upgrade 0.1.0 -> 0.1.1 while connected with the kill switch on"
+say "upgrade $VER -> $UP while connected with the kill switch on"
 OLDPID=$(R 'systemctl show -p MainPID --value alizyd')
 monitor
 check "upgrade succeeds" bash -c "podman exec -u tester -w /home/tester/Downloads $C ./up --yes > $WORK/up.log 2>&1; rc=\$?; tail -6 $WORK/up.log; [[ \$rc == 0 ]]"
 check "kill-switch table present in every sample during the upgrade" monitor_end
-check "service restarted onto the new files" bash -c "n=\$(podman exec $C systemctl show -p MainPID --value alizyd); echo $OLDPID '->' \$n; [[ \$n != $OLDPID && \$n != 0 ]] && podman exec $C cat /usr/local/lib/alizy/VERSION | grep -qx 0.1.1"
+check "service restarted onto the new files" bash -c "n=\$(podman exec $C systemctl show -p MainPID --value alizyd); echo $OLDPID '->' \$n; [[ \$n != $OLDPID && \$n != 0 ]] && podman exec $C cat /usr/local/lib/alizy/VERSION | grep -qx $UP"
 check "after the restart: protected, kill switch verified (keys are never kept by the daemon)" bash -c "s=\$(podman exec $C $IPC state); echo \$s; [[ \$s == protected && \$(podman exec $C $IPC verified) == True ]]"
 check "reconnect after the upgrade" bash -c "podman exec $C $IPC connect '$CPRIV' '$SPUB' '$PEER_IP' 51820 && sleep 2 && [[ \$(podman exec $C $IPC state) == connected ]]"
 
@@ -103,7 +107,7 @@ say "failed upgrade rolls back"
 monitor
 check "broken upgrade is refused and rolled back" bash -c "podman exec -u tester -w /home/tester/Downloads $C ./broken --yes > $WORK/broken.log 2>&1; rc=\$?; tail -4 $WORK/broken.log; [[ \$rc != 0 ]] && grep -q 'was restored and is running' $WORK/broken.log"
 check "kill-switch table present in every sample during the failed upgrade" monitor_end
-check "previous version running again" bash -c "podman exec $C systemctl is-active alizyd && podman exec $C cat /usr/local/lib/alizy/VERSION | grep -qx 0.1.1 && podman exec $C /usr/local/bin/alizyd --version | grep -q '^alizyd 0.1'"
+check "previous version running again" bash -c "podman exec $C systemctl is-active alizyd && podman exec $C cat /usr/local/lib/alizy/VERSION | grep -qx $UP && podman exec $C /usr/local/bin/alizyd --version | grep -qx 'alizyd $VER'"
 check "kill switch still verified after the rollback" bash -c "[[ \$(podman exec $C $IPC verified) == True ]]"
 
 say "uninstall while the daemon is down, kill switch rules in the kernel, DNS left modified"

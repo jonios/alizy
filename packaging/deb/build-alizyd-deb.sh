@@ -3,7 +3,7 @@
 # The GUI .deb is produced by the Tauri bundler and depends on this package.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-VER=0.1.0
+VER=0.2.0
 ARCH=$(dpkg --print-architecture)
 OUT="$ROOT/target/deb/alizyd_${VER}_${ARCH}"
 rm -rf "$OUT"; mkdir -p "$OUT/DEBIAN"
