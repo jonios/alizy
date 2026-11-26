@@ -74,6 +74,10 @@ impl LinuxAdapter {
     async fn apply_routes(&self, routes: &RoutePlan) -> Result<(), String> {
         for key in &routes.sysctls {
             let path = PathBuf::from("/proc/sys").join(key.replace('.', "/"));
+            // Already set (e.g. preset where /proc/sys is read-only, as in containers).
+            if std::fs::read_to_string(&path).is_ok_and(|v| v.trim() == "1") {
+                continue;
+            }
             std::fs::write(&path, b"1").map_err(|e| format!("sysctl {key}: {e}"))?;
         }
         for cmd in &routes.up {
