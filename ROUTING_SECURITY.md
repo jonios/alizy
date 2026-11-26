@@ -38,6 +38,12 @@ interact. All of it is one nftables table, `inet alizy`, rendered from one plan
 * **firewalld IPv6 rpfilter** runs at raw priority, before Alizy restores the
   split mark; IPv6 *Direct* replies may be dropped there. IPv4 uses the kernel's
   `rp_filter` with `src_valid_mark=1` and works.
+* **Strict reverse-path filtering** (`rp_filter=1` on every interface): the
+  WireGuard socket marks its packets; chains `wg_mark` (postrouting) and `wg_pre`
+  (prerouting) copy that mark to conntrack and back onto the server's replies, so
+  with `src_valid_mark=1` the encrypted replies are looked up outside the tunnel
+  instead of dropped (wg-quick does the same). SSH profiles use `ssh_mark`/`ssh_pre`.
+  Verified in a namespace with `rp_filter=1`: [docs/TESTING.md](docs/TESTING.md).
 * **Containers** (Docker etc.): forwarded traffic is covered by the `forward`
   chain; split-tunnel bypass marking applies to locally generated traffic only.
 * **Hostname endpoints** are resolved before the tunnel exists; with DNS blocked

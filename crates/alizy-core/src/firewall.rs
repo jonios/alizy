@@ -152,7 +152,10 @@ impl FirewallPlan {
             || !self.ipv6_enabled
             || (self.dns_leak_protection && self.tunnel.is_some())
             || (self.split_active())
-            || self.tunnel.as_ref().is_some_and(|t| t.block_udp || t.ssh_uid.is_some())
+            || self
+                .tunnel
+                .as_ref()
+                .is_some_and(|t| t.block_udp || t.ssh_uid.is_some() || !t.endpoints.is_empty())
     }
 
     /// Bypass marking/NAT is only needed while a tunnel captures traffic.
@@ -182,6 +185,7 @@ impl FirewallPlan {
         self.render_sets(&mut s);
         self.render_split(&mut s);
         self.render_ssh_mark(&mut s);
+        self.render_wg_mark(&mut s);
         self.render_output(&mut s, &tag);
         self.render_input(&mut s);
         self.render_forward(&mut s);
@@ -317,6 +321,32 @@ impl FirewallPlan {
                 ep.port()
             );
         }
+        s.push_str("  }\n");
+    }
+
+    /// The WireGuard socket marks its packets FWMARK. Copy that mark to
+    /// conntrack and back onto the server's replies, so strict reverse-path
+    /// filtering (rp_filter=1, with src_valid_mark) looks the encrypted
+    /// replies up outside the tunnel instead of dropping them (as wg-quick does).
+    fn render_wg_mark(&self, s: &mut String) {
+        let Some(t) = self.tunnel.as_ref().filter(|t| !t.endpoints.is_empty()) else {
+            return;
+        };
+        s.push_str("  chain wg_mark {\n");
+        s.push_str("    type filter hook postrouting priority mangle; policy accept;\n");
+        for ep in &t.endpoints {
+            let fam = if ep.is_ipv4() { "ip" } else { "ip6" };
+            let _ = writeln!(
+                s,
+                "    meta mark {FWMARK:#x} {fam} daddr {} udp dport {} ct mark set meta mark",
+                ep.ip(),
+                ep.port()
+            );
+        }
+        s.push_str("  }\n");
+        s.push_str("  chain wg_pre {\n");
+        s.push_str("    type filter hook prerouting priority mangle; policy accept;\n");
+        let _ = writeln!(s, "    ct mark {FWMARK:#x} meta mark set ct mark");
         s.push_str("  }\n");
     }
 
@@ -499,15 +529,20 @@ mod tests {
 
     #[test]
     fn no_table_when_nothing_enforced() {
-        let p = FirewallPlan::new(
-            &NetworkPolicy {
-                dns_leak_protection: false,
-                ..Default::default()
-            },
-            tunnel(),
-        );
+        let off = NetworkPolicy {
+            dns_leak_protection: false,
+            ..Default::default()
+        };
+        let p = FirewallPlan::new(&off, None);
         assert!(!p.needs_table());
         assert_eq!(p.render(), render_removal());
+        // A WireGuard tunnel alone only needs the conntrack-mark chains (strict
+        // rp_filter): nothing is filtered.
+        let t = FirewallPlan::new(&off, tunnel());
+        assert!(t.needs_table());
+        let r = t.render();
+        assert!(r.contains("  chain wg_mark {") && r.contains("  chain wg_pre {"));
+        assert!(!r.contains("reject") && !r.contains("drop"), "{r}");
     }
 
     #[test]
@@ -679,12 +714,13 @@ mod tests {
     // ---- SSH tunnels ----
 
     /// Goldens captured from the renderer before SSH support was added: a
-    /// WireGuard plan must render byte-identically and keep its tag.
+    /// WireGuard plan keeps its tag and renders identically except for the
+    /// conntrack-mark chains (wg_mark/wg_pre) added for strict rp_filter.
     #[test]
     fn wg_plan_render_and_tag_unchanged() {
         let ks = FirewallPlan::new(&policy(true), tunnel());
         assert_eq!(ks.tag(), "alizy:9317c868e4bd82fd");
-        assert_eq!(ks.render(), "table inet alizy\ndelete table inet alizy\ntable inet alizy {\n  comment \"alizy:9317c868e4bd82fd managed by alizyd; do not edit\"\n  chain output {\n    type filter hook output priority filter - 10; policy accept;\n    oifname \"lo\" accept\n    meta mark 0x4a5a ip daddr 198.51.100.7 udp dport 51820 accept\n    meta mark 0x4a5a ip6 daddr 2001:db8::7 udp dport 51820 accept\n    udp sport 68 udp dport 67 ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 224.0.0.0/4, 255.255.255.255 } accept\n    udp sport 546 udp dport 547 ip6 daddr { ff02::1:2, fe80::/10 } accept\n    icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert, mld2-listener-report } accept\n    oifname != \"alizy0\" udp dport { 53, 853 } counter reject with icmpx admin-prohibited comment \"dns-leak\"\n    oifname != \"alizy0\" tcp dport { 53, 853 } counter reject with icmpx admin-prohibited comment \"dns-leak\"\n    oifname \"alizy0\" accept\n    ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 224.0.0.0/4, 255.255.255.255 } accept comment \"lan\"\n    ip6 daddr { fe80::/10, fc00::/7, ff00::/8 } accept comment \"lan\"\n    counter reject with icmpx admin-prohibited comment \"alizy:9317c868e4bd82fd kill-switch\"\n  }\n  chain forward {\n    type filter hook forward priority filter - 10; policy accept;\n    oifname \"alizy0\" accept\n    iifname \"alizy0\" accept\n    ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 224.0.0.0/4, 255.255.255.255 } accept comment \"lan\"\n    ip6 daddr { fe80::/10, fc00::/7, ff00::/8 } accept comment \"lan\"\n    counter drop comment \"kill-switch\"\n  }\n}\n");
+        assert_eq!(ks.render(), "table inet alizy\ndelete table inet alizy\ntable inet alizy {\n  comment \"alizy:9317c868e4bd82fd managed by alizyd; do not edit\"\n  chain wg_mark {\n    type filter hook postrouting priority mangle; policy accept;\n    meta mark 0x4a5a ip daddr 198.51.100.7 udp dport 51820 ct mark set meta mark\n    meta mark 0x4a5a ip6 daddr 2001:db8::7 udp dport 51820 ct mark set meta mark\n  }\n  chain wg_pre {\n    type filter hook prerouting priority mangle; policy accept;\n    ct mark 0x4a5a meta mark set ct mark\n  }\n  chain output {\n    type filter hook output priority filter - 10; policy accept;\n    oifname \"lo\" accept\n    meta mark 0x4a5a ip daddr 198.51.100.7 udp dport 51820 accept\n    meta mark 0x4a5a ip6 daddr 2001:db8::7 udp dport 51820 accept\n    udp sport 68 udp dport 67 ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 224.0.0.0/4, 255.255.255.255 } accept\n    udp sport 546 udp dport 547 ip6 daddr { ff02::1:2, fe80::/10 } accept\n    icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert, mld2-listener-report } accept\n    oifname != \"alizy0\" udp dport { 53, 853 } counter reject with icmpx admin-prohibited comment \"dns-leak\"\n    oifname != \"alizy0\" tcp dport { 53, 853 } counter reject with icmpx admin-prohibited comment \"dns-leak\"\n    oifname \"alizy0\" accept\n    ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 224.0.0.0/4, 255.255.255.255 } accept comment \"lan\"\n    ip6 daddr { fe80::/10, fc00::/7, ff00::/8 } accept comment \"lan\"\n    counter reject with icmpx admin-prohibited comment \"alizy:9317c868e4bd82fd kill-switch\"\n  }\n  chain forward {\n    type filter hook forward priority filter - 10; policy accept;\n    oifname \"alizy0\" accept\n    iifname \"alizy0\" accept\n    ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 224.0.0.0/4, 255.255.255.255 } accept comment \"lan\"\n    ip6 daddr { fe80::/10, fc00::/7, ff00::/8 } accept comment \"lan\"\n    counter drop comment \"kill-switch\"\n  }\n}\n");
         let nov6 = FirewallPlan::new(
             &NetworkPolicy {
                 ipv6_enabled: false,
@@ -693,7 +729,7 @@ mod tests {
             tunnel(),
         );
         assert_eq!(nov6.tag(), "alizy:5aa7506c6c07b0f9");
-        assert_eq!(nov6.render(), "table inet alizy\ndelete table inet alizy\ntable inet alizy {\n  comment \"alizy:5aa7506c6c07b0f9 managed by alizyd; do not edit\"\n  chain output {\n    type filter hook output priority filter - 10; policy accept;\n    oifname \"lo\" accept\n    meta mark 0x4a5a ip daddr 198.51.100.7 udp dport 51820 accept\n    meta mark 0x4a5a ip6 daddr 2001:db8::7 udp dport 51820 accept\n    udp sport 68 udp dport 67 ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 224.0.0.0/4, 255.255.255.255 } accept\n    udp sport 546 udp dport 547 ip6 daddr { ff02::1:2, fe80::/10 } accept\n    icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert, mld2-listener-report } accept\n    meta nfproto ipv6 counter reject with icmpx admin-prohibited comment \"ipv6-disabled\"\n    oifname != \"alizy0\" udp dport { 53, 853 } counter reject with icmpx admin-prohibited comment \"dns-leak\"\n    oifname != \"alizy0\" tcp dport { 53, 853 } counter reject with icmpx admin-prohibited comment \"dns-leak\"\n    oifname \"alizy0\" accept\n  }\n  chain input {\n    type filter hook input priority filter - 10; policy accept;\n    iifname \"lo\" accept\n    ip saddr 198.51.100.7 udp sport 51820 accept\n    ip6 saddr 2001:db8::7 udp sport 51820 accept\n    udp sport 67 udp dport 68 accept\n    udp sport 547 udp dport 546 accept\n    icmpv6 type { nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert, nd-redirect } accept\n    meta nfproto ipv6 counter drop comment \"ipv6-disabled\"\n  }\n  chain forward {\n    type filter hook forward priority filter - 10; policy accept;\n    meta nfproto ipv6 counter drop comment \"ipv6-disabled\"\n  }\n}\n");
+        assert_eq!(nov6.render(), "table inet alizy\ndelete table inet alizy\ntable inet alizy {\n  comment \"alizy:5aa7506c6c07b0f9 managed by alizyd; do not edit\"\n  chain wg_mark {\n    type filter hook postrouting priority mangle; policy accept;\n    meta mark 0x4a5a ip daddr 198.51.100.7 udp dport 51820 ct mark set meta mark\n    meta mark 0x4a5a ip6 daddr 2001:db8::7 udp dport 51820 ct mark set meta mark\n  }\n  chain wg_pre {\n    type filter hook prerouting priority mangle; policy accept;\n    ct mark 0x4a5a meta mark set ct mark\n  }\n  chain output {\n    type filter hook output priority filter - 10; policy accept;\n    oifname \"lo\" accept\n    meta mark 0x4a5a ip daddr 198.51.100.7 udp dport 51820 accept\n    meta mark 0x4a5a ip6 daddr 2001:db8::7 udp dport 51820 accept\n    udp sport 68 udp dport 67 ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 224.0.0.0/4, 255.255.255.255 } accept\n    udp sport 546 udp dport 547 ip6 daddr { ff02::1:2, fe80::/10 } accept\n    icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert, mld2-listener-report } accept\n    meta nfproto ipv6 counter reject with icmpx admin-prohibited comment \"ipv6-disabled\"\n    oifname != \"alizy0\" udp dport { 53, 853 } counter reject with icmpx admin-prohibited comment \"dns-leak\"\n    oifname != \"alizy0\" tcp dport { 53, 853 } counter reject with icmpx admin-prohibited comment \"dns-leak\"\n    oifname \"alizy0\" accept\n  }\n  chain input {\n    type filter hook input priority filter - 10; policy accept;\n    iifname \"lo\" accept\n    ip saddr 198.51.100.7 udp sport 51820 accept\n    ip6 saddr 2001:db8::7 udp sport 51820 accept\n    udp sport 67 udp dport 68 accept\n    udp sport 547 udp dport 546 accept\n    icmpv6 type { nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert, nd-redirect } accept\n    meta nfproto ipv6 counter drop comment \"ipv6-disabled\"\n  }\n  chain forward {\n    type filter hook forward priority filter - 10; policy accept;\n    meta nfproto ipv6 counter drop comment \"ipv6-disabled\"\n  }\n}\n");
         assert_eq!(
             FirewallPlan::new(&NetworkPolicy::default(), tunnel()).tag(),
             "alizy:d3afc8da1335f78f"
@@ -899,8 +935,10 @@ mod tests {
             "  chain ssh_pre {\n    type filter hook prerouting priority mangle; policy accept;\n    ct mark 0x4a5a meta mark set ct mark\n  }\n",
         );
         assert!(set < pre);
+        assert!(!r.contains("wg_mark") && !r.contains("wg_pre"));
         let wg = FirewallPlan::new(&policy(true), tunnel()).render();
-        assert!(!wg.contains("ssh_pre") && !wg.contains("ct mark"));
+        assert!(!wg.contains("ssh_pre") && !wg.contains("ssh_mark"));
+        assert!(wg.contains("  chain wg_pre {\n    type filter hook prerouting priority mangle; policy accept;\n    ct mark 0x4a5a meta mark set ct mark\n  }\n"));
     }
 
     #[test]
