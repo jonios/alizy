@@ -76,6 +76,7 @@ mod linux_main {
               [--resolv-conf PATH]
        alizyd --askpass PROMPT    (internal) SSH_ASKPASS helper run by ssh
        alizyd --probe             print the system compatibility report (JSON)
+       alizyd --check             print compatibility findings as tab-separated lines (exit 2 on blockers)
        alizyd --remove-firewall   remove Alizy's nftables table, routing rules and interface
        alizyd --version";
 
@@ -93,6 +94,35 @@ mod linux_main {
         Run(Args),
         Done,
         Remove,
+        Check,
+    }
+
+    /// `alizyd --check`: the compatibility findings as `severity<TAB>message<TAB>fix`
+    /// lines (for the shell installer). Exit status 2 when a blocker was found.
+    fn check() -> anyhow::Result<()> {
+        use alizy_core::sysprobe::Severity;
+        let clean = |s: &str| s.replace(['\t', '\n'], " ");
+        let report = alizy_core::sysprobe::probe();
+        let mut blocked = false;
+        for f in &report.findings {
+            let sev = match f.severity {
+                Severity::Blocker => {
+                    blocked = true;
+                    "blocker"
+                }
+                Severity::Warning => "warning",
+                Severity::Info => "info",
+            };
+            println!(
+                "{sev}\t{}\t{}",
+                clean(&f.message),
+                clean(f.fix.as_deref().unwrap_or(""))
+            );
+        }
+        if blocked {
+            std::process::exit(2);
+        }
+        Ok(())
     }
 
     fn parse_args() -> anyhow::Result<Mode> {
@@ -124,6 +154,7 @@ mod linux_main {
                     println!("{}", serde_json::to_string_pretty(&alizy_core::sysprobe::probe())?);
                     return Ok(Mode::Done);
                 }
+                "--check" => return Ok(Mode::Check),
                 "--remove-firewall" => return Ok(Mode::Remove),
                 "-h" | "--help" => {
                     println!("{USAGE}");
@@ -213,6 +244,7 @@ mod linux_main {
             Mode::Run(a) => a,
             Mode::Done => return Ok(()),
             Mode::Remove => return remove_everything().await,
+            Mode::Check => return check(),
         };
 
         let mode = match args.auth.as_str() {
