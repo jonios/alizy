@@ -427,11 +427,19 @@ mod tests {
 
     #[tokio::test]
     async fn stop_releases_the_port() {
-        let p = LanSocks::start(0).await.unwrap();
-        let port = p.local_addr().port();
-        p.stop().await;
-        let again = LanSocks::start(port).await.unwrap();
-        assert_eq!(again.local_addr().port(), port);
+        // Parallel tests' client sockets can take the freed ephemeral port
+        // before the rebind; only that race is retried, with a fresh port.
+        for _ in 0..5 {
+            let p = LanSocks::start(0).await.unwrap();
+            let port = p.local_addr().port();
+            p.stop().await;
+            match LanSocks::start(port).await {
+                Ok(again) => return assert_eq!(again.local_addr().port(), port),
+                Err(e) if e.to_string().contains("already in use") => continue,
+                Err(e) => panic!("{e}"),
+            }
+        }
+        panic!("the port stayed in use after stop() in 5 attempts");
     }
 
     #[tokio::test]

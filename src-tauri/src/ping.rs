@@ -377,10 +377,11 @@ mod tests {
 
     #[test]
     fn blackhole_reports_a_timeout() {
-        // TEST-NET-1: no host answers, so the probe must not hang forever.
+        // TEST-NET-1: no host answers, so the probe must not hang forever. A
+        // router on the way may answer "host unreachable" instead of staying silent.
         let started = Instant::now();
         let err = probe(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))).unwrap_err();
-        assert_eq!(err, "timeout");
+        assert!(err == "timeout" || err == "unreachable", "{err}");
         assert!(started.elapsed() < Duration::from_secs(3));
     }
 
@@ -405,7 +406,11 @@ mod tests {
         );
         assert!(results[1].latency_ms.is_some() && results[1].error.is_none());
         assert_eq!(results[2].latency_ms, None);
-        assert_eq!(results[2].error.as_deref(), Some("timeout"));
+        assert!(
+            matches!(results[2].error.as_deref(), Some("timeout" | "unreachable")),
+            "{:?}",
+            results[2]
+        );
     }
 
     #[tokio::test]
