@@ -19,7 +19,7 @@ license=(GPL-3.0-or-later)
 makedepends=(cargo git nodejs npm webkit2gtk-4.1)
 options=(!lto !debug)
 source=("$pkgbase::git+$url.git#tag=v$pkgver")
-sha256sums=('SKIP')
+sha256sums=('99c6283c291f8d95683420e23380a063c8f640df6b53837681422d0821361e97')
 
 prepare() {
   cd "$pkgbase"
