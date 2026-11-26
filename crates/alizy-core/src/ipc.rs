@@ -301,9 +301,14 @@ mod tests {
             },
         };
         let s = serde_json::to_string(&c).unwrap();
-        assert_eq!(s, r#"{"cmd":"set_lan_proxy","config":{"enabled":true,"port":8080,"socks_port":1080}}"#);
+        assert_eq!(
+            s,
+            r#"{"cmd":"set_lan_proxy","config":{"enabled":true,"port":8080,"socks_port":1080}}"#
+        );
         let back: Command = serde_json::from_str(&s).unwrap();
-        assert!(matches!(back, Command::SetLanProxy { config } if config.enabled && config.port == 8080 && config.socks_port == 1080));
+        assert!(
+            matches!(back, Command::SetLanProxy { config } if config.enabled && config.port == 8080 && config.socks_port == 1080)
+        );
         assert!(matches!(
             serde_json::from_str::<Request>(r#"{"id":2,"cmd":"get_lan_proxy"}"#)
                 .unwrap()

@@ -42,6 +42,7 @@ const BUF: usize = 16 * 1024;
 /// flight; [`LanProxy::stop`] does the same and *waits* until the listening
 /// socket is actually closed, so the port can be re-bound immediately.
 pub struct LanProxy {
+    #[cfg_attr(not(test), allow(dead_code))]
     local: SocketAddr,
     task: Option<JoinHandle<()>>,
 }
@@ -103,6 +104,7 @@ impl LanProxy {
     }
 
     /// The address the listener is bound to (`0.0.0.0:<port>`).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn local_addr(&self) -> SocketAddr {
         self.local
     }

@@ -988,8 +988,11 @@ impl<A: Backend> Engine<A> {
                 }
                 Err(e) => {
                     status.socks_error = Some(e.to_string());
-                    self.events
-                        .push(Lvl::Error, Cat::Network, format!("LAN SOCKS5 proxy could not start: {e}"));
+                    self.events.push(
+                        Lvl::Error,
+                        Cat::Network,
+                        format!("LAN SOCKS5 proxy could not start: {e}"),
+                    );
                 }
             }
             if status.listening || status.socks_listening {
@@ -2248,12 +2251,21 @@ mod tests {
         let (port, socks_port) = two_free_ports();
         let st = t
             .engine
-            .set_lan_proxy(LanProxyConfig { enabled: true, port, socks_port })
+            .set_lan_proxy(LanProxyConfig {
+                enabled: true,
+                port,
+                socks_port,
+            })
             .await
             .unwrap();
         assert!(
-            st.enabled && st.listening && st.port == port && st.error.is_none()
-                && st.socks_listening && st.socks_port == socks_port && st.socks_error.is_none(),
+            st.enabled
+                && st.listening
+                && st.port == port
+                && st.error.is_none()
+                && st.socks_listening
+                && st.socks_port == socks_port
+                && st.socks_error.is_none(),
             "{st:?}"
         );
         // The HTTP listener is really up.
@@ -2270,14 +2282,28 @@ mod tests {
         assert_eq!(g, [5, 0]);
         // The firewall plan now carries both reply exceptions.
         assert_eq!(t.fake().with(|s| s.applied.last().unwrap().lan_proxy_port), Some(port));
-        assert_eq!(t.fake().with(|s| s.applied.last().unwrap().lan_socks_port), Some(socks_port));
+        assert_eq!(
+            t.fake().with(|s| s.applied.last().unwrap().lan_socks_port),
+            Some(socks_port)
+        );
         // Persisted: a fresh engine over the same state would come back on.
         let persisted = t.engine.inner.lock().await.persisted.lan_proxy.clone();
-        assert_eq!(persisted, LanProxyConfig { enabled: true, port, socks_port });
+        assert_eq!(
+            persisted,
+            LanProxyConfig {
+                enabled: true,
+                port,
+                socks_port
+            }
+        );
 
         // Disable: listeners gone (ports reusable) and no rules in the plan.
         t.engine
-            .set_lan_proxy(LanProxyConfig { enabled: false, port, socks_port })
+            .set_lan_proxy(LanProxyConfig {
+                enabled: false,
+                port,
+                socks_port,
+            })
             .await
             .unwrap();
         assert!(tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_err());
@@ -2296,7 +2322,11 @@ mod tests {
         let socks_port = free_port();
         let st = t
             .engine
-            .set_lan_proxy(LanProxyConfig { enabled: true, port, socks_port })
+            .set_lan_proxy(LanProxyConfig {
+                enabled: true,
+                port,
+                socks_port,
+            })
             .await
             .unwrap();
         assert!(st.enabled && !st.listening, "{st:?}");
@@ -2306,7 +2336,11 @@ mod tests {
         drop(taken);
         let st = t
             .engine
-            .set_lan_proxy(LanProxyConfig { enabled: true, port, socks_port })
+            .set_lan_proxy(LanProxyConfig {
+                enabled: true,
+                port,
+                socks_port,
+            })
             .await
             .unwrap();
         assert!(st.error.is_none(), "{st:?}");
@@ -2318,7 +2352,11 @@ mod tests {
         let t = engine(false).await;
         let e = t
             .engine
-            .set_lan_proxy(LanProxyConfig { enabled: true, port: 0, socks_port: 1080 })
+            .set_lan_proxy(LanProxyConfig {
+                enabled: true,
+                port: 0,
+                socks_port: 1080,
+            })
             .await
             .unwrap_err();
         assert!(e.message.contains("port"), "{e:?}");
@@ -2326,7 +2364,11 @@ mod tests {
         let socks_port = free_port();
         let st = t
             .engine
-            .set_lan_proxy(LanProxyConfig { enabled: true, port, socks_port })
+            .set_lan_proxy(LanProxyConfig {
+                enabled: true,
+                port,
+                socks_port,
+            })
             .await
             .unwrap();
         assert!(st.enabled && st.listening && st.error.is_none(), "{st:?}");

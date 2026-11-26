@@ -3,6 +3,7 @@ name = "alizy-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 description = "Platform-neutral core logic for Alizy: config parsing, validation, firewall/routing plans, state machine, IPC protocol."
 
 [dependencies]

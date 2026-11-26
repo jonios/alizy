@@ -27,6 +27,7 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 const BUF: usize = 16 * 1024;
 
 pub struct LanSocks {
+    #[cfg_attr(not(test), allow(dead_code))]
     local: SocketAddr,
     task: Option<JoinHandle<()>>,
 }
@@ -81,6 +82,7 @@ impl LanSocks {
         })
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn local_addr(&self) -> SocketAddr {
         self.local
     }
@@ -106,9 +108,7 @@ fn bind_error(e: &io::Error, port: u16) -> io::Error {
         io::ErrorKind::AddrInUse => {
             io::Error::other(format!("SOCKS5 port {port} is already in use by another service"))
         }
-        io::ErrorKind::PermissionDenied => {
-            io::Error::other(format!("not allowed to bind SOCKS5 port {port}"))
-        }
+        io::ErrorKind::PermissionDenied => io::Error::other(format!("not allowed to bind SOCKS5 port {port}")),
         _ => io::Error::other(format!("could not listen on SOCKS5 port {port}: {e}")),
     }
 }
@@ -150,10 +150,7 @@ async fn serve(mut client: TcpStream) -> io::Result<()> {
     if req[1] != 0x01 {
         // Only CONNECT (0x01). BIND (0x02) and UDP ASSOCIATE (0x03) are unsupported.
         socks_reply(&mut client, 0x07, None).await?; // command not supported
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "only CONNECT is supported",
-        ));
+        return Err(io::Error::new(io::ErrorKind::Unsupported, "only CONNECT is supported"));
     }
 
     let (host, port) = match req[3] {
@@ -163,10 +160,7 @@ async fn serve(mut client: TcpStream) -> io::Result<()> {
             client.read_exact(&mut addr).await?;
             let mut p = [0u8; 2];
             client.read_exact(&mut p).await?;
-            (
-                IpAddr::V4(Ipv4Addr::from(addr)).to_string(),
-                u16::from_be_bytes(p),
-            )
+            (IpAddr::V4(Ipv4Addr::from(addr)).to_string(), u16::from_be_bytes(p))
         }
         0x03 => {
             // Domain name
@@ -176,9 +170,8 @@ async fn serve(mut client: TcpStream) -> io::Result<()> {
             client.read_exact(&mut name).await?;
             let mut p = [0u8; 2];
             client.read_exact(&mut p).await?;
-            let domain = String::from_utf8(name).map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidData, "domain is not UTF-8")
-            })?;
+            let domain = String::from_utf8(name)
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "domain is not UTF-8"))?;
             (domain, u16::from_be_bytes(p))
         }
         0x04 => {
@@ -187,17 +180,11 @@ async fn serve(mut client: TcpStream) -> io::Result<()> {
             client.read_exact(&mut addr).await?;
             let mut p = [0u8; 2];
             client.read_exact(&mut p).await?;
-            (
-                IpAddr::V6(Ipv6Addr::from(addr)).to_string(),
-                u16::from_be_bytes(p),
-            )
+            (IpAddr::V6(Ipv6Addr::from(addr)).to_string(), u16::from_be_bytes(p))
         }
         _ => {
             socks_reply(&mut client, 0x08, None).await?; // address type not supported
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "unsupported address type",
-            ));
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported address type"));
         }
     };
 
@@ -226,11 +213,7 @@ async fn serve(mut client: TcpStream) -> io::Result<()> {
 
 /// Send a SOCKS5 reply. `0x00` = success. `bound` is the address the upstream
 /// socket is bound to (for the BND.ADDR/BND.PORT fields in the reply).
-async fn socks_reply(
-    client: &mut TcpStream,
-    status: u8,
-    bound: Option<&SocketAddr>,
-) -> io::Result<()> {
+async fn socks_reply(client: &mut TcpStream, status: u8, bound: Option<&SocketAddr>) -> io::Result<()> {
     let mut buf = vec![5, status, 0];
     match bound {
         Some(SocketAddr::V4(a)) => {
@@ -261,9 +244,7 @@ async fn connect(host: &str, port: u16) -> io::Result<TcpStream> {
         match timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await {
             Ok(Ok(s)) => return Ok(s),
             Ok(Err(e)) => last = Some(e),
-            Err(_) => {
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "connect timed out"))
-            }
+            Err(_) => return Err(io::Error::new(io::ErrorKind::TimedOut, "connect timed out")),
         }
     }
     Err(last.unwrap_or_else(|| io::Error::other(format!("no address for {host}"))))
@@ -275,10 +256,7 @@ async fn relay(client: TcpStream, upstream: TcpStream) -> io::Result<()> {
     tokio::try_join!(pump(cr, uw), pump(ur, cw)).map(|_| ())
 }
 
-async fn pump<R: tokio::io::AsyncRead + Unpin, W: tokio::io::AsyncWrite + Unpin>(
-    mut r: R,
-    mut w: W,
-) -> io::Result<()> {
+async fn pump<R: tokio::io::AsyncRead + Unpin, W: tokio::io::AsyncWrite + Unpin>(mut r: R, mut w: W) -> io::Result<()> {
     let mut buf = vec![0u8; BUF];
     loop {
         let n = match timeout(IDLE_TIMEOUT, r.read(&mut buf)).await {

@@ -3,6 +3,7 @@ name = "alizy-store"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 description = "Alizy persistence: SQLite (profiles, settings, history, logs) and OS secret storage."
 
 [dependencies]
