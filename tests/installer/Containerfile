@@ -1,0 +1,21 @@
+# A systemd-booted distribution image for installer lifecycle tests.
+# Deliberately WITHOUT Alizy's runtime dependencies (wireguard-tools, nftables,
+# iproute2, polkit): the installer must detect them and install them itself.
+#   podman build --build-arg BASE=docker.io/library/ubuntu:24.04 -t alizy-itest:ubuntu24 tests/installer
+#   (also debian:12, fedora:latest, archlinux:latest)
+ARG BASE=docker.io/library/ubuntu:22.04
+FROM ${BASE}
+RUN if command -v apt-get >/dev/null; then \
+      export DEBIAN_FRONTEND=noninteractive; apt-get update \
+      && apt-get install -y --no-install-recommends systemd systemd-sysv dbus sudo python3 procps ca-certificates kmod passwd \
+      && rm -rf /var/lib/apt/lists/*; \
+    elif command -v dnf >/dev/null; then \
+      dnf install -y systemd dbus-broker sudo python3 procps-ng shadow-utils util-linux && dnf clean all; \
+    elif command -v pacman >/dev/null; then \
+      pacman -Syu --noconfirm --needed systemd sudo python procps-ng shadow util-linux && pacman -Scc --noconfirm; \
+    fi \
+ && useradd -m -s /bin/bash tester \
+ && echo 'tester ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/tester && chmod 0440 /etc/sudoers.d/tester \
+ && for u in systemd-networkd systemd-resolved getty@tty1 console-getty; do systemctl mask "$u" 2>/dev/null || true; done
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]

@@ -23,7 +23,11 @@ off, and the optional `ALIZY_KEEP_CONN` NetworkManager connection brought back u
 | `60-aur-package.sh upgrade DIR` | AUR packages: upgrade over the installed version with the kill switch sampled every 0.1 s, restart onto the new unit, data preserved (digests only), installed files and permissions, socket access, new GUI launch. No profile variables needed. |
 | `60-aur-package.sh remove DIR` | removing the GUI keeps the service; removing the service removes its firewall/routes/interface and keeps all data; reinstall starts nothing by itself; enabling restores the saved policy; reconnect with the stored key. **Takes the VPN down for about a minute.** |
 
-`60-aur-package.sh` writes `target/system-validation/aur-<phase>.tsv`.
+| `70-installer-migration.sh [DIST]` | moves the machine from the pacman packages to the release installer + AppImage: refusal of package-managed installs, migration with data digests, AppImage on this host, reinstall while connected with the kill-switch table sampled. **Takes the VPN down for about a minute.** |
+
+`60-aur-package.sh` writes `target/system-validation/aur-<phase>.tsv`; `70-installer-migration.sh`
+writes `target/system-validation/installer-migration.tsv`. Container-based tests of the
+installer and AppImage on other distributions: `tests/installer/run.sh`, `tests/appimage/smoke.sh`.
 
 Results go to `target/system-validation/results.tsv` (git-ignored: it can contain
 host network details).

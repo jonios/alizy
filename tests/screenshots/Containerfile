@@ -1,0 +1,15 @@
+# Isolated environment for README screenshots of the REAL application:
+# the release AppImage under Xvfb, talking to a real alizyd that drives a real
+# WireGuard tunnel to a server in a separate network namespace. Run with
+# --network none: no host network, no real addresses, no personal data.
+FROM docker.io/library/ubuntu:22.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      wireguard-tools nftables iproute2 iputils-ping python3 sqlite3 \
+      xvfb x11-utils xdotool imagemagick dbus dbus-x11 fonts-inter fonts-dejavu-core \
+      libgl1-mesa-dri libegl1 libgbm1 libwayland-client0 libharfbuzz0b libfribidi0 ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd --system alizy && useradd -m -s /bin/bash -G alizy demo \
+ && printf '#!/bin/sh\n# Screenshot container only: there is no login session for polkit to judge.\nexit 0\n' > /usr/bin/pkcheck \
+ && chmod 0755 /usr/bin/pkcheck
+CMD ["sleep", "infinity"]
