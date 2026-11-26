@@ -1,0 +1,14 @@
+build-essential
+ca-certificates
+curl
+file
+git
+libayatana-appindicator3-dev
+librsvg2-dev
+libssl-dev
+libwebkit2gtk-4.1-dev
+libxdo-dev
+patchelf
+pkg-config
+wget
+xz-utils

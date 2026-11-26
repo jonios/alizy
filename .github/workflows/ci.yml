@@ -1,0 +1,35 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-22.04
+    env:
+      RUST_VERSION: "1.100.0"
+    steps:
+      - uses: actions/checkout@v4
+      - name: System packages
+        run: |
+          sudo apt-get update
+          xargs -a scripts/release/build-deps.txt sudo apt-get install -y --no-install-recommends
+      - name: Rust ${{ env.RUST_VERSION }}
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt,clippy
+          rustup default "$RUST_VERSION"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.22.3"
+      - run: npm ci --no-audit --no-fund
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace
+      - run: npm run build
+      - name: Shell scripts parse
+        run: for f in packaging/installer/alizy-installer.sh scripts/release/*.sh tests/installer/run.sh; do bash -n "$f"; done

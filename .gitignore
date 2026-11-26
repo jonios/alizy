@@ -19,3 +19,5 @@ src-tauri/gen
 /.worktrees/
 # editor session transcripts
 /opencode/
+# release build output
+/dist-release/
