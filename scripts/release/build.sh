@@ -12,7 +12,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$PWD
-OUT=${OUT:-$ROOT/dist-release}
+OUT=$(realpath -m "${OUT:-$ROOT/dist-release}")
 GLIBC_MAX=2.35
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$ROOT/target}
 export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct 2>/dev/null || date +%s)}
