@@ -196,10 +196,13 @@ version_lt() { # a < b (x.y.z[-pre])
   [[ $1 != "$2" ]] && [[ $(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1) == "$1" ]]
 }
 
+kill_switch_saved_on() { grep -q '"kill_switch": *true' "$STATE/state.json" 2>/dev/null; }
+
 protection_summary() {
   local s=""
   service_active && s+="service running" || s+="service not running"
-  table_present && s+=", kill-switch/firewall table present" || s+=", no Alizy firewall table"
+  kill_switch_saved_on && s+=", kill switch on" || s+=", kill switch off"
+  table_present && s+=", Alizy firewall table present" || s+=", no Alizy firewall table"
   tunnel_present && s+=", VPN tunnel up" || s+=", no tunnel"
   echo "$s"
 }
@@ -378,7 +381,7 @@ cmd_status() {
 cmd_install() {
   elevate
   extract_payload
-  local user home was_version foreign appimage upgrading=0 was_active=0 had_table=0 added_group=0
+  local user home was_version foreign appimage upgrading=0 was_active=0 had_table=0 ks_on=0 added_group=0
   user=$(invoking_user)
   [[ $(uname -m) == x86_64 ]] || die "this installer is for x86_64; this machine is $(uname -m)."
   [[ -d /run/systemd/system ]] || die "systemd is not running as the init system. Alizy's service needs systemd for boot-time protection; it is not supported on this system."
@@ -397,6 +400,7 @@ The installer never overwrites files it did not install. Your profiles and setti
     else say "  Upgrade: $was_version -> $VERSION"; fi
     service_active && was_active=1
     table_present && had_table=1
+    kill_switch_saved_on && ks_on=1
     say "  Current state: $(protection_summary)"
   fi
 
@@ -408,8 +412,12 @@ The installer never overwrites files it did not install. Your profiles and setti
   if [[ $upgrading == 1 ]]; then
     if [[ $was_active == 1 ]]; then
       say "  - restart the running service onto the new version. A connected VPN drops for about a second;"
-      [[ $had_table == 1 ]] && say "    the kill-switch rules stay in the kernel the whole time, so nothing leaks," \
-                            && say "    and the app reconnects your previous profile by itself."
+      if [[ $ks_on == 1 && $had_table == 1 ]]; then
+        say "    the kill-switch rules stay in the kernel the whole time, so nothing leaks."
+      else
+        say "    The kill switch is off: for that second, traffic uses your normal connection."
+      fi
+      say "    The app reconnects your previous profile by itself."
       say "    If the new version fails to start, the previous one is restored automatically."
     fi
   elif [[ $NO_ENABLE == 0 ]]; then
@@ -440,8 +448,8 @@ The installer never overwrites files it did not install. Your profiles and setti
     systemctl restart alizyd.service || true
     if wait_ready; then
       ok "service restarted on $("$BIN" --version)"
-      if [[ $had_table == 1 ]]; then
-        table_present && ok "kill-switch/firewall table still in place" || warn "the Alizy firewall table is not present after the restart (it is re-applied from the saved setting; check the app)"
+      if [[ $ks_on == 1 && $had_table == 1 ]]; then
+        table_present && ok "kill-switch rules still in place" || warn "the kill-switch rules are not present after the restart (they are re-applied from the saved setting; check the app)"
       fi
       rm -rf "$LIBDIR/rollback"
     else

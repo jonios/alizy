@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Installer: the upgrade plan and status now report the kill switch from its saved
+  setting. 0.2.1 said "nothing leaks" during the service restart whenever Alizy's
+  firewall table existed, which is also the case with the kill switch off while a
+  WireGuard tunnel is up (behaviour was correct; only the message was wrong).
+
 ## 0.2.1
 
 First release distributed through GitHub Releases. (The `v0.2.0` tag exists but its

@@ -99,6 +99,7 @@ OLDPID=$(R 'systemctl show -p MainPID --value alizyd')
 monitor
 check "upgrade succeeds" bash -c "podman exec -u tester -w /home/tester/Downloads $C ./up --yes > $WORK/up.log 2>&1; rc=\$?; tail -6 $WORK/up.log; [[ \$rc == 0 ]]"
 check "kill-switch table present in every sample during the upgrade" monitor_end
+check "upgrade plan states the kill switch is on (nothing leaks)" bash -c "grep -E 'Current state|nothing leaks' $WORK/up.log && grep -q 'kill switch on' $WORK/up.log && grep -q 'nothing leaks' $WORK/up.log"
 check "service restarted onto the new files" bash -c "n=\$(podman exec $C systemctl show -p MainPID --value alizyd); echo $OLDPID '->' \$n; [[ \$n != $OLDPID && \$n != 0 ]] && podman exec $C cat /usr/local/lib/alizy/VERSION | grep -qx $UP"
 check "after the restart: protected, kill switch verified (keys are never kept by the daemon)" bash -c "s=\$(podman exec $C $IPC state); echo \$s; [[ \$s == protected && \$(podman exec $C $IPC verified) == True ]]"
 check "reconnect after the upgrade" bash -c "podman exec $C $IPC connect '$CPRIV' '$SPUB' '$PEER_IP' 51820 && sleep 2 && [[ \$(podman exec $C $IPC state) == connected ]]"
