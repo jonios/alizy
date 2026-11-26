@@ -29,7 +29,7 @@ fn explain_connect_error(e: &std::io::Error, path: &str) -> String {
             "The Alizy service (alizyd) is not running: {path} does not exist. Start it with `sudo systemctl enable --now alizyd`."
         ),
         std::io::ErrorKind::PermissionDenied => format!(
-            "Permission denied on {path}. Your session is not in the `alizy` group yet: add it with `sudo usermod -aG alizy $USER`, then reboot (logging out is not enough if your systemd user manager lingers)."
+            "Permission denied on {path}. Your session is not in the `alizy` group yet: add it with `sudo usermod -aG alizy $USER`, then log out completely and log back in. If `id -nG` still does not list `alizy`, your systemd user manager outlived the logout (lingering, uwsm, another open session): reboot once."
         ),
         std::io::ErrorKind::ConnectionRefused => "The Alizy service is not accepting connections (it may be restarting).".into(),
         _ => format!("Cannot reach the Alizy service: {e}"),
