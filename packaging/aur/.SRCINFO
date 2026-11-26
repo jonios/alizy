@@ -1,0 +1,47 @@
+pkgbase = alizy
+	pkgdesc = WireGuard desktop client with an OS-level nftables kill switch
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/jonios/alizy
+	arch = x86_64
+	arch = aarch64
+	license = GPL-3.0-or-later
+	makedepends = cargo
+	makedepends = git
+	makedepends = nodejs
+	makedepends = npm
+	makedepends = webkit2gtk-4.1
+	options = !lto
+	options = !debug
+	source = alizy::git+https://github.com/jonios/alizy.git#tag=v0.1.0
+	sha256sums = SKIP
+
+pkgname = alizyd
+	pkgdesc = Privileged service of a WireGuard client: tunnels, nftables kill switch, DNS and split tunnelling
+	install = alizyd.install
+	depends = glibc
+	depends = iproute2
+	depends = libgcc
+	depends = nftables
+	depends = polkit
+	depends = systemd
+	depends = wireguard-tools
+	optdepends = openresolv: DNS management on systems without systemd-resolved
+	optdepends = openssh: SSH tunnel profiles
+	optdepends = badvpn: SSH tunnel profiles (badvpn-tun2socks)
+
+pkgname = alizy
+	pkgdesc = WireGuard desktop client with an OS-level nftables kill switch (unprivileged GUI)
+	depends = alizyd=0.1.0
+	depends = cairo
+	depends = dbus
+	depends = gdk-pixbuf2
+	depends = glib2
+	depends = glibc
+	depends = gtk3
+	depends = libgcc
+	depends = hicolor-icon-theme
+	depends = libsoup3
+	depends = webkit2gtk-4.1
+	optdepends = libayatana-appindicator: system tray icon
+	optdepends = org.freedesktop.secrets: keep private keys in the desktop keyring (GNOME Keyring, KWallet, KeePassXC)

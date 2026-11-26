@@ -1,6 +1,6 @@
 [Unit]
 Description=Alizy VPN service (WireGuard tunnels, kill switch, split tunnelling)
-Documentation=https://github.com/alizy/alizy
+Documentation=https://github.com/jonios/alizy
 # Start before networking so the kill switch is enforced from early boot.
 DefaultDependencies=no
 After=local-fs.target systemd-sysusers.service

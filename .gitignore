@@ -6,6 +6,9 @@ src-tauri/gen
 # makepkg build output
 /packaging/arch/src/
 /packaging/arch/pkg/
+/packaging/aur/src/
+/packaging/aur/pkg/
+/packaging/aur/alizy/
 *.pkg.tar.zst
 *.pkg.tar.zst.sig
 # local validation output (may contain host network details)
@@ -14,3 +17,5 @@ src-tauri/gen
 /.superpowers/
 # git worktrees
 /.worktrees/
+# editor session transcripts
+/opencode/

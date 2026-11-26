@@ -1,16 +1,18 @@
-# Maintainer: Alizy developers
-# Split package: `alizyd` (privileged service) and `alizy` (unprivileged GUI).
-# Build from a local checkout:  cd packaging/arch && makepkg -si
+# Local-checkout build for development: packages THIS working tree, including
+# uncommitted changes.   cd packaging/arch && makepkg -si
+# The AUR package (fetches a release tag) is packaging/aur/PKGBUILD; keep the
+# dependency lists and package() steps of both files in sync.
+# alizyd.install is a symlink to ../aur/alizyd.install.
 pkgbase=alizy
 pkgname=(alizyd alizy)
 pkgver=0.1.0
-pkgrel=9
+pkgrel=12
 pkgdesc="WireGuard desktop client with an OS-level nftables kill switch"
-arch=('x86_64' 'aarch64')
-url="https://github.com/alizy/alizy"
-license=('GPL-3.0-or-later')
-makedepends=('cargo' 'nodejs' 'npm' 'webkit2gtk-4.1' 'libayatana-appindicator')
-options=('!lto')
+arch=(x86_64 aarch64)
+url="https://github.com/jonios/alizy"
+license=(GPL-3.0-or-later)
+makedepends=(cargo nodejs npm webkit2gtk-4.1)
+options=(!lto !debug)
 source=()
 sha256sums=()
 
@@ -19,9 +21,9 @@ _src() { realpath "$startdir/../.."; }
 build() {
   cd "$(_src)"
   export CARGO_TARGET_DIR="$srcdir/target"
-  npm ci
+  npm ci --no-audit --no-fund
   cargo build --release --locked -p alizyd
-  npx tauri build --no-bundle -- --locked
+  ./node_modules/.bin/tauri build --no-bundle -- --locked
 }
 
 check() {
@@ -31,29 +33,35 @@ check() {
 }
 
 package_alizyd() {
-  pkgdesc="Alizy privileged service: WireGuard tunnels, nftables kill switch, DNS and split tunnelling"
-  depends=('wireguard-tools' 'nftables' 'iproute2' 'polkit' 'systemd')
+  pkgdesc="Privileged service of a WireGuard client: tunnels, nftables kill switch, DNS and split tunnelling"
+  depends=(glibc iproute2 libgcc nftables polkit systemd wireguard-tools)
   optdepends=('openresolv: DNS management on systems without systemd-resolved'
-              'openssh: SSH profiles'
-              'badvpn: SSH profiles (tun2socks)')
+              'openssh: SSH tunnel profiles'
+              'badvpn: SSH tunnel profiles (badvpn-tun2socks)')
   install=alizyd.install
   local s; s="$(_src)"
-  install -Dm755 "$srcdir/target/release/alizyd" "$pkgdir/usr/bin/alizyd"
-  install -Dm644 "$s/packaging/linux/alizyd.service" "$pkgdir/usr/lib/systemd/system/alizyd.service"
+  install -Dm755 "$srcdir/target/release/alizyd" -t "$pkgdir/usr/bin/"
+  install -Dm644 "$s/packaging/linux/alizyd.service" -t "$pkgdir/usr/lib/systemd/system/"
   install -Dm644 "$s/packaging/linux/alizy.sysusers" "$pkgdir/usr/lib/sysusers.d/alizy.conf"
-  install -Dm644 "$s/packaging/linux/io.alizy.policy" "$pkgdir/usr/share/polkit-1/actions/io.alizy.policy"
-  install -Dm644 "$s/SECURITY.md" "$pkgdir/usr/share/doc/alizy/SECURITY.md"
+  install -Dm644 "$s/packaging/linux/io.alizy.policy" -t "$pkgdir/usr/share/polkit-1/actions/"
+  install -Dm644 "$s/SECURITY.md" -t "$pkgdir/usr/share/doc/alizyd/"
 }
 
 package_alizy() {
-  pkgdesc="Alizy WireGuard desktop client (GUI, runs unprivileged)"
-  depends=('alizyd' 'webkit2gtk-4.1' 'gtk3')
+  pkgdesc="WireGuard desktop client with an OS-level nftables kill switch (unprivileged GUI)"
+  depends=("alizyd=$pkgver" cairo dbus gdk-pixbuf2 glib2 glibc gtk3 libgcc
+           hicolor-icon-theme libsoup3 webkit2gtk-4.1)
   optdepends=('libayatana-appindicator: system tray icon'
-              'gnome-keyring: secure private-key storage (or any Secret Service provider such as KWallet)')
-  local s; s="$(_src)"
-  install -Dm755 "$srcdir/target/release/alizy" "$pkgdir/usr/bin/alizy"
-  install -Dm644 "$s/packaging/linux/io.alizy.app.desktop" "$pkgdir/usr/share/applications/io.alizy.app.desktop"
-  install -Dm644 "$s/src-tauri/icons/128x128.png" "$pkgdir/usr/share/icons/hicolor/128x128/apps/io.alizy.app.png"
-  install -Dm644 "$s/src-tauri/icons/32x32.png" "$pkgdir/usr/share/icons/hicolor/32x32/apps/io.alizy.app.png"
-  install -Dm644 "$s/README.md" "$pkgdir/usr/share/doc/alizy/README.md"
+              'org.freedesktop.secrets: keep private keys in the desktop keyring (GNOME Keyring, KWallet, KeePassXC)')
+  local s size; s="$(_src)"
+  install -Dm755 "$srcdir/target/release/alizy" -t "$pkgdir/usr/bin/"
+  install -Dm644 "$s/packaging/linux/io.alizy.app.desktop" -t "$pkgdir/usr/share/applications/"
+  for size in 32 64 128; do
+    install -Dm644 "$s/src-tauri/icons/${size}x${size}.png" \
+      "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/io.alizy.app.png"
+  done
+  install -Dm644 "$s/src-tauri/icons/128x128@2x.png" "$pkgdir/usr/share/icons/hicolor/256x256/apps/io.alizy.app.png"
+  install -Dm644 "$s/src-tauri/icons/icon.png" "$pkgdir/usr/share/icons/hicolor/512x512/apps/io.alizy.app.png"
+  install -Dm644 "$s/src-tauri/icons/alizy.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/io.alizy.app.svg"
+  install -Dm644 "$s/README.md" -t "$pkgdir/usr/share/doc/alizy/"
 }

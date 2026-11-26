@@ -1,0 +1,83 @@
+# Maintainer: Alireza Yarahmadi <REPLACE-WITH-YOUR-EMAIL>
+#
+# Split package from one source tree:
+#   alizyd  privileged system service (WireGuard, nftables kill switch, DNS, split tunnelling)
+#   alizy   unprivileged desktop GUI; depends on alizyd
+# `yay -S alizy` / `paru -S alizy` builds both and installs both.
+#
+# Releasing a new version: see docs/RELEASING.md (packaging/aur-release.sh
+# updates pkgver, the checksum and .SRCINFO).
+
+pkgbase=alizy
+pkgname=(alizyd alizy)
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="WireGuard desktop client with an OS-level nftables kill switch"
+arch=(x86_64 aarch64)
+url="https://github.com/jonios/alizy"
+license=(GPL-3.0-or-later)
+makedepends=(cargo git nodejs npm webkit2gtk-4.1)
+options=(!lto !debug)
+source=("$pkgbase::git+$url.git#tag=v$pkgver")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$pkgbase"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/^host: //p')"
+  npm ci --cache "$srcdir/npm-cache" --no-audit --no-fund
+}
+
+build() {
+  cd "$pkgbase"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR="$srcdir/target"
+  cargo build --frozen --release -p alizyd
+  # Builds the web UI (npm run build) and the GUI binary; no bundles.
+  ./node_modules/.bin/tauri build --no-bundle -- --frozen
+}
+
+check() {
+  cd "$pkgbase"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR="$srcdir/target"
+  cargo test --frozen --release -p alizy-core -p alizy-store -p alizyd
+}
+
+package_alizyd() {
+  pkgdesc="Privileged service of a WireGuard client: tunnels, nftables kill switch, DNS and split tunnelling"
+  depends=(glibc iproute2 libgcc nftables polkit systemd wireguard-tools)
+  optdepends=('openresolv: DNS management on systems without systemd-resolved'
+              'openssh: SSH tunnel profiles'
+              'badvpn: SSH tunnel profiles (badvpn-tun2socks)')
+  install=alizyd.install
+
+  cd "$pkgbase"
+  # 0755 is required: alizyd also serves as SSH_ASKPASS for the alizy-ssh user.
+  install -Dm755 "$srcdir/target/release/alizyd" -t "$pkgdir/usr/bin/"
+  install -Dm644 packaging/linux/alizyd.service -t "$pkgdir/usr/lib/systemd/system/"
+  install -Dm644 packaging/linux/alizy.sysusers "$pkgdir/usr/lib/sysusers.d/alizy.conf"
+  install -Dm644 packaging/linux/io.alizy.policy -t "$pkgdir/usr/share/polkit-1/actions/"
+  install -Dm644 SECURITY.md -t "$pkgdir/usr/share/doc/alizyd/"
+}
+
+package_alizy() {
+  pkgdesc="WireGuard desktop client with an OS-level nftables kill switch (unprivileged GUI)"
+  depends=("alizyd=$pkgver" cairo dbus gdk-pixbuf2 glib2 glibc gtk3 libgcc
+           hicolor-icon-theme libsoup3 webkit2gtk-4.1)
+  optdepends=('libayatana-appindicator: system tray icon'
+              'org.freedesktop.secrets: keep private keys in the desktop keyring (GNOME Keyring, KWallet, KeePassXC)')
+
+  cd "$pkgbase"
+  install -Dm755 "$srcdir/target/release/alizy" -t "$pkgdir/usr/bin/"
+  install -Dm644 packaging/linux/io.alizy.app.desktop -t "$pkgdir/usr/share/applications/"
+  local size
+  for size in 32 64 128; do
+    install -Dm644 "src-tauri/icons/${size}x${size}.png" \
+      "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/io.alizy.app.png"
+  done
+  install -Dm644 src-tauri/icons/128x128@2x.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/io.alizy.app.png"
+  install -Dm644 src-tauri/icons/icon.png "$pkgdir/usr/share/icons/hicolor/512x512/apps/io.alizy.app.png"
+  install -Dm644 src-tauri/icons/alizy.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/io.alizy.app.svg"
+  install -Dm644 README.md -t "$pkgdir/usr/share/doc/alizy/"
+}

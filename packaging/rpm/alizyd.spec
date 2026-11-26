@@ -7,7 +7,7 @@ Version:        0.1.0
 Release:        1%{?dist}
 Summary:        Alizy VPN service: WireGuard, nftables kill switch, split tunnelling
 License:        GPL-3.0-or-later
-URL:            https://github.com/alizy/alizy
+URL:            https://github.com/jonios/alizy
 Source1:        alizy.sysusers
 Requires:       wireguard-tools nftables polkit systemd
 %if 0%{?suse_version}

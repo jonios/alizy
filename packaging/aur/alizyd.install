@@ -1,0 +1,84 @@
+# pacman scriptlets for the alizyd package (shared by the AUR PKGBUILD and the
+# local-checkout PKGBUILD in packaging/arch, which links to this file).
+#
+# pacman's own hooks run after these scriptlets (PostTransaction): they create
+# the sysusers entries, reload systemd and refresh icon/desktop caches. The
+# scriptlets below only do what must happen at a precise point in the
+# transaction.
+
+post_install() {
+  cat <<'EOF'
+==> Alizy is installed. Nothing is running yet: the service is not enabled and
+==> the kill switch is OFF. Your network configuration has not been changed.
+==>
+==> 1. Start the service now and at every boot:
+==>      sudo systemctl enable --now alizyd
+==> 2. Allow your account to control it:
+==>      sudo usermod -aG alizy "$USER"
+==> 3. Log out completely and log back in, then check:  id -nG | grep -w alizy
+==>    No 'alizy' in the output? Your systemd user manager outlived the logout
+==>    (lingering, uwsm, another open session): reboot once instead.
+==> 4. Start "Alizy" from your application menu (as your normal user).
+==>
+==> If the kill switch ever blocks your network:  sudo alizyd --remove-firewall
+EOF
+}
+
+post_upgrade() {
+  # Create any sysusers entry this version adds before the restart below:
+  # pacman's sysusers hook only runs after the whole transaction.
+  systemd-sysusers /usr/lib/sysusers.d/alizy.conf 2>/dev/null || true
+  # Same for the unit file: restart with the new one, not the cached old one.
+  systemctl daemon-reload
+  local was_active=0
+  systemctl -q is-active alizyd.service && was_active=1
+  systemctl try-restart alizyd.service
+  # An upgrade must never leave a kill switch in the kernel that nothing is
+  # managing: if the service was running before and did not come back, drop
+  # Alizy's own rules rather than black-hole the network. A service that was
+  # deliberately stopped keeps its protection (fail closed), so it is left
+  # alone here.
+  if [ "$was_active" -eq 1 ] && ! systemctl -q is-active alizyd.service; then
+    /usr/bin/alizyd --remove-firewall 2>/dev/null || true
+    echo ">>> alizyd did not come back after the upgrade; its nftables rules were"
+    echo ">>> removed so the network stays reachable. Bring it back with:"
+    echo ">>>     sudo systemctl enable --now alizyd"
+  fi
+}
+
+pre_remove() {
+  # Stopping the service takes the tunnel down and restores DNS.
+  systemctl disable --now alizyd.service 2>/dev/null || true
+  # Remove only Alizy's own nftables table, routing rules and interface, so an
+  # uninstalled package never leaves a kill switch blocking the network.
+  /usr/bin/alizyd --remove-firewall 2>/dev/null || true
+  # The daemon restores /etc/resolv.conf when it stops normally; this covers a
+  # daemon that had already crashed (systems without systemd-resolved only).
+  if [ -f /var/lib/alizy/resolv.conf.backup ]; then
+    if [ -f /var/lib/alizy/resolv.conf.link ]; then
+      ln -sfn "$(cat /var/lib/alizy/resolv.conf.link)" /etc/resolv.conf
+    else
+      cp /var/lib/alizy/resolv.conf.backup /etc/resolv.conf
+    fi
+    rm -f /var/lib/alizy/resolv.conf.backup /var/lib/alizy/resolv.conf.link
+  fi
+}
+
+post_remove() {
+  cat <<'EOF'
+==> alizyd was removed: its service, firewall table, routing rules and
+==> interface are gone and your network is back to normal.
+==>
+==> Kept on purpose (your data is never deleted by pacman):
+==>   service state, split rules:   /var/lib/alizy
+==>   system group / user:          alizy, alizy-ssh
+==>   profiles, settings, history:  ~/.local/share/io.alizy.app   (per user)
+==>   private keys:                 desktop keyring "io.alizy.app", or the
+==>                                 secrets/ folder in the directory above
+==>
+==> For a complete removal:
+==>   sudo rm -rf /var/lib/alizy
+==>   sudo userdel alizy-ssh; sudo groupdel alizy
+==>   rm -rf ~/.local/share/io.alizy.app ~/.config/autostart/Alizy.desktop
+EOF
+}
