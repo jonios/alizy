@@ -20,6 +20,10 @@ off, and the optional `ALIZY_KEEP_CONN` NetworkManager connection brought back u
 | `30-suspend.sh` | suspend/resume (~25 s, RTC wake) with the kill switch on |
 | `40-tray-notify.sh` | tray menu actions via `com.canonical.dbusmenu`, desktop notifications (GUI must be running) |
 | `50-upgrade-restart.sh` | package upgrade while connected; GUI reconnect after a service restart |
+| `60-aur-package.sh upgrade DIR` | AUR packages: upgrade over the installed version with the kill switch sampled every 0.1 s, restart onto the new unit, data preserved (digests only), installed files and permissions, socket access, new GUI launch. No profile variables needed. |
+| `60-aur-package.sh remove DIR` | removing the GUI keeps the service; removing the service removes its firewall/routes/interface and keeps all data; reinstall starts nothing by itself; enabling restores the saved policy; reconnect with the stored key. **Takes the VPN down for about a minute.** |
+
+`60-aur-package.sh` writes `target/system-validation/aur-<phase>.tsv`.
 
 Results go to `target/system-validation/results.tsv` (git-ignored: it can contain
 host network details).
