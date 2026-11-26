@@ -24,7 +24,7 @@ was not found (WireGuard tools). Fix: sudo apt install wireguard-tools"*).
 | Ayatana AppIndicator | tray (optional) | libayatana-appindicator / libayatana-appindicator3-1 / libayatana-appindicator-gtk3 / libayatana-appindicator3-1 |
 | Secret Service (GNOME Keyring, KWallet, KeePassXC) | key storage (optional; 0600 file fallback) | — |
 | OpenSSH client ≥ 8.4 (`ssh`, `ssh-keyscan`) | SSH profiles (optional) | openssh / openssh-client / openssh-clients / openssh-clients |
-| `badvpn-tun2socks` | SSH profiles (optional) | badvpn (all; may need a third-party repository) |
+| `badvpn-tun2socks` | SSH profiles (optional) | badvpn (Arch: official `extra` repository, verified 2026-11-26; other distributions: not verified, may need a third-party repository) |
 | `alizy-ssh` system user | SSH profiles | created by the packages (`sysusers.d`) |
 
 SSH dependencies are optional: when missing, System Check shows an
@@ -49,7 +49,7 @@ recommended first check on any new distribution.
 
 ## Known limitations
 
-* **Group membership after install:** if the systemd user manager lingers (`loginctl enable-linger`, uwsm), logging out is not enough — reboot so the session gets the `alizy` group.
+* **Group membership after install:** log out completely and log back in, then check `id -nG`. If the systemd user manager outlived the logout (`loginctl enable-linger`, uwsm, another open session), it keeps the old group list; reboot once in that case.
 
 * **Non-systemd init:** the daemon runs, but no unit/boot-time protection is shipped.
 * **resolv.conf managed by NetworkManager without resolved:** Alizy re-asserts its

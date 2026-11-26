@@ -450,3 +450,44 @@ split tunnelling: not implemented on any platform.
 | No keys / credentials in commit candidates | PASS | no 32-byte base64 key strings except the public RFC 7748 / unit-test vectors; no passwords, tokens or API keys |
 | No sensitive network information | PASS after fixes | removed from this report: the user's tunnel address and username; the user's profile names replaced by "profile A/B"; test scripts no longer hard-code profile or NetworkManager connection names (environment variables, see `tests/system/README.md`). The only public IPs in source are the published CDN ranges used for shared-address warnings. |
 | No platform/package over-claims | PASS after fix | README and milestone log now state that only the Arch package was installed and validated; DEB/RPM/AppImage untested; Windows/macOS not implemented (README, docs/PLATFORMS.md) |
+
+## 13. AUR package (`packaging/aur`), 2026-11-26
+
+**Build.** `packaging/aur-release.sh 0.1.0 11 --build` on a throwaway git repository holding a
+snapshot of the working tree (tracked + untracked, minus `opencode/`), tagged `v0.1.0`. This is
+the real AUR code path (`git+…#tag=` source, sha256 of `git archive <tag>` validated by
+makepkg, `prepare`/`build`/`check`/`package`), only fetched from `file://` instead of GitHub.
+Result: built; `check()` 217 tests passed, 0 failed (2 ignored). `namcap PKGBUILD`: clean.
+`namcap` on the packages: only expected warnings (runtime-executed tools reported as "may not
+be needed"; the deliberate `systemd-sysusers` call in `post_upgrade`). Every dependency
+resolves from `core`/`extra` (`pacman -Sp`); `badvpn` is in `extra` (1.999.130-11).
+The test packages were built before `gcc-libs` was replaced by `libgcc` in `depends`
+(metadata only; both installed here).
+
+**Upgrade `0.1.0-10` (local build) → `0.1.0-11` (AUR build), connected, kill switch on**
+(`tests/system/60-aur-package.sh upgrade`): 28 PASS, 1 FAIL (test-script bug: systemctl prints
+properties in another order; the values were `active`/`enabled`/`Type=notify`; check fixed).
+Kill-switch table present in all 52 samples (every 0.1 s) during the upgrade; daemon restarted
+onto the new binary with readiness after protection; no "unit changed on disk" warning; policy,
+profiles, settings, key files, key backends, service state unchanged (digests); history kept;
+GUI reconnected the previous profile by itself; installed files, `pacman -Qkk`, permissions
+(`alizyd` 0755 root, socket 0660 root:alizy, `/var/lib/alizy` 0700), socket access for the
+group and refusal for `nobody`; new GUI launched and logged its connection to the service.
+
+**Removal and reinstall** (`… remove`): 39 PASS, 2 FAIL. Removing `alizy` left the service
+running (same PID, still connected, kill switch in the kernel). Removing `alizyd` stopped and
+removed the unit, the `inet alizy` table, `alizy0` and the routing rules; `/etc/resolv.conf`
+unchanged; network worked without Alizy; `/var/lib/alizy`, the group, the user and all user
+data were kept; the post-remove message was shown. Reinstall printed the post-install message
+and started nothing (service disabled, no firewall table, network unchanged). Enabling the
+service restored the saved policy (protected, verified). The 2 FAILs were the harness: the
+previous profile was an SSH profile, which `alizyctl connect` cannot connect (it needs a typed
+password), so "reconnect" and the following internet check failed; the GUI's auto-connect then
+connected a WireGuard profile with the kill switch verified (observed in the daemon's events).
+The script now starts the GUI and checks its auto-connect instead.
+
+**Not tested:** `yay`/`paru` (the package is not on the AUR yet; their behaviour for split
+packages is standard makepkg), a clean-chroot build (`devtools` not installed), the real
+GitHub tag (does not exist yet), aarch64, re-login group activation (this account has
+`Linger=yes`, so only the reboot path applies here), the `pre_remove` resolv.conf restore
+(this machine uses systemd-resolved), bit-for-bit reproducibility.
