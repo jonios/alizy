@@ -3,7 +3,7 @@
 # Build: cp packaging/linux/alizy.sysusers ~/rpmbuild/SOURCES/ &&
 #        rpmbuild -bb packaging/rpm/alizyd.spec --define "_srcroot $PWD"
 Name:           alizyd
-Version:        0.2.0
+Version:        0.2.1
 Release:        1%{?dist}
 Summary:        Alizy VPN service: WireGuard, nftables kill switch, split tunnelling
 License:        GPL-3.0-or-later

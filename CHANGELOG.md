@@ -1,8 +1,9 @@
 # Changelog
 
-## 0.2.0 (unreleased)
+## 0.2.1
 
-First release distributed through GitHub Releases.
+First release distributed through GitHub Releases. (The `v0.2.0` tag exists but its
+release build failed on a path bug in the release script; there is no 0.2.0 release.)
 
 ### Distribution
 - **AppImage** (`Alizy-x86_64.AppImage`): the desktop app as one portable file, built on

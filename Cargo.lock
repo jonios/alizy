@@ -30,7 +30,7 @@ dependencies = [
 
 [[package]]
 name = "alizy"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "alizy-core",
  "alizy-store",
@@ -54,7 +54,7 @@ dependencies = [
 
 [[package]]
 name = "alizy-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -69,7 +69,7 @@ dependencies = [
 
 [[package]]
 name = "alizy-store"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "alizy-core",
  "keyring",
@@ -87,7 +87,7 @@ dependencies = [
 
 [[package]]
 name = "alizyd"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "alizy-core",
  "anyhow",
