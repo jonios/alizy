@@ -16,7 +16,7 @@ produces). Older validation of the daemon and the Arch packages:
 | glibc floor of `alizyd` and the AppImage's `alizy` | glibc ≤ 2.34 (target 2.35) |
 | AppImage contents (AppRun, desktop file), installer header syntax, payload marker, `--help` version, `alizyd --version` | PASS |
 | `SHA256SUMS` generated and verified | PASS |
-| `cargo fmt --check`, `cargo clippy -D warnings`, `npm run build` on Rust 1.100 | see the commit's CI run |
+| `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, `npm run build` on GitHub Actions (`ubuntu-22.04`, Rust 1.100) | PASS (`ci` run 45875404839) |
 | Real-kernel namespace suite (`tests/leak/run.sh`): kill switch, TCP/DNS leaks, split tunnelling, crash recovery, firewall tamper | 55 passed, 0 failed |
 
 ## Installer lifecycle: `tests/installer/run.sh <distro>`
@@ -108,6 +108,8 @@ The kill-switch-**on** variant of upgrade/restart on this machine is in
 | containers | `/proc/sys` read-only: connecting failed although `src_valid_mark` was already 1 | the daemon only writes sysctls that are not already set |
 | Ubuntu container | installer exited 1 after successful uninstall/remove-app; the menu entry was not written (icons in a root-only temp dir) | fixed |
 | release build | the existing AppImage needed glibc 2.39 (Ubuntu 24.04+ only) | releases are built on Ubuntu 22.04 |
+| GitHub CI, repeated local runs | two timing-dependent tests (port reuse after `stop()`, ping to an unrouted address answered with "unreachable") failed intermittently | tests tolerate only those races; the checked behaviour is unchanged |
+| Rust 1.100 clippy | the declared minimum Rust version (1.80) was wrong: the code needs 1.88 | `rust-version = "1.88"`, inherited by every crate |
 
 ## Not tested
 
