@@ -4,7 +4,7 @@
 
 use crate::exec::{argv, run};
 use alizy_core::routing::DnsPlan;
-use alizy_core::sysprobe::{choose_dns_backend, find_exe, DnsBackend};
+use alizy_core::sysprobe::{choose_dns_backend, DnsBackend};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -28,7 +28,7 @@ pub async fn detect_backend() -> DnsBackend {
     let target = std::fs::canonicalize(RESOLV_CONF)
         .ok()
         .map(|p| p.to_string_lossy().into_owned());
-    choose_dns_backend(resolved, target.as_deref(), find_exe("resolvconf").is_some())
+    choose_dns_backend(resolved, target.as_deref(), alizy_core::sysprobe::has_real_resolvconf())
 }
 
 impl Dns {

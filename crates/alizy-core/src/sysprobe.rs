@@ -244,6 +244,20 @@ pub fn choose_dns_backend(resolved_active: bool, resolv_conf_target: Option<&str
     }
 }
 
+/// A usable resolvconf: not systemd's compatibility shim (a link to
+/// `resolvectl`), which only works while systemd-resolved is running and is
+/// covered by the systemd-resolved backend when it is.
+pub fn has_real_resolvconf() -> bool {
+    find_exe("resolvconf").is_some_and(|p| !is_resolvectl_shim(Path::new(&p)))
+}
+
+fn is_resolvectl_shim(path: &Path) -> bool {
+    std::fs::canonicalize(path)
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n == "resolvectl"))
+        .unwrap_or(false)
+}
+
 /// Executables the daemon needs, mapped to the package that provides them.
 pub const REQUIRED_EXES: &[(&str, Dependency)] = &[
     ("wg", Dependency::WireguardTools),
@@ -414,7 +428,7 @@ pub fn probe() -> SystemReport {
     let resolv_conf_target = std::fs::canonicalize("/etc/resolv.conf")
         .ok()
         .map(|p| p.to_string_lossy().into_owned());
-    let dns_backend = choose_dns_backend(resolved_active, resolv_conf_target.as_deref(), has("resolvconf"));
+    let dns_backend = choose_dns_backend(resolved_active, resolv_conf_target.as_deref(), has_real_resolvconf());
     let kw = kernel_wireguard(&kernel);
     let ssh_missing = compute_ssh_missing_unversioned(has);
     let mut report = SystemReport {
@@ -551,6 +565,22 @@ mod tests {
             id_like: like.split_whitespace().map(String::from).collect(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn systemd_resolvconf_shim_is_not_resolvconf() {
+        let dir = std::env::temp_dir().join(format!("alizy-shim-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("resolvectl");
+        std::fs::write(&target, b"").unwrap();
+        let link = dir.join("resolvconf");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(is_resolvectl_shim(&link));
+        let real = dir.join("real-resolvconf");
+        std::fs::write(&real, b"").unwrap();
+        assert!(!is_resolvectl_shim(&real));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
