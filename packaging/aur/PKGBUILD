@@ -16,7 +16,7 @@ pkgdesc="WireGuard desktop client with an OS-level nftables kill switch"
 arch=(x86_64 aarch64)
 url="https://github.com/jonios/alizy"
 license=(GPL-3.0-or-later)
-makedepends=(cargo git nodejs npm webkit2gtk-4.1)
+makedepends=(cargo git nodejs npm webkit2gtk-4.1 iproute2 nftables polkit systemd wireguard-tools)
 options=(!lto !debug)
 source=("$pkgbase::git+$url.git#tag=v$pkgver")
 sha256sums=('67db6b5c6e066d161ebf5dd640659fcb587f82cce2118718fdc2b47edf70dba5')

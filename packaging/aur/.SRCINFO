@@ -11,6 +11,11 @@ pkgbase = alizy
 	makedepends = nodejs
 	makedepends = npm
 	makedepends = webkit2gtk-4.1
+	makedepends = iproute2
+	makedepends = nftables
+	makedepends = polkit
+	makedepends = systemd
+	makedepends = wireguard-tools
 	options = !lto
 	options = !debug
 	source = alizy::git+https://github.com/jonios/alizy.git#tag=v0.2.1
