@@ -11,6 +11,7 @@ import { useNow } from "../../lib/hooks";
 import { errMsg } from "../../lib/utils";
 import { useNav } from "../../store/nav";
 import { useProfiles } from "../../store/profiles";
+import { t } from "../../i18n";
 
 export function HistoryTable() {
   const [rows, setRows] = useState<HistoryEntry[] | null>(null);
@@ -37,13 +38,13 @@ export function HistoryTable() {
 
   if (rows === null) {
     return error ? (
-      <EmptyState tone="danger" icon={<History />} title="History unavailable" description={<span className="selectable">{error}</span>} action={<Button size="sm" variant="secondary" onClick={() => void load()}><RefreshCw /> Try again</Button>} />
+      <EmptyState tone="danger" icon={<History />} title={t("History unavailable")} description={<span className="selectable">{error}</span>} action={<Button size="sm" variant="secondary" onClick={() => void load()}><RefreshCw /> {t("Try again")}</Button>} />
     ) : (
       <SkeletonRows rows={6} />
     );
   }
   if (rows.length === 0) {
-    return <EmptyState icon={<History />} title="No connections yet" description="Each VPN session is recorded here with its duration and data usage." />;
+    return <EmptyState icon={<History />} title={t("No connections yet")} description={t("Each VPN session is recorded here with its duration and data usage.")} />;
   }
 
   const totalRx = rows.reduce((n, r) => n + r.rx_bytes, 0);
@@ -53,23 +54,23 @@ export function HistoryTable() {
     <div className="flex flex-col gap-3">
       <div className="flex items-center justify-between text-xs text-muted">
         <span>
-          {rows.length} session{rows.length === 1 ? "" : "s"} · ↓ {formatBytes(totalRx)} · ↑ {formatBytes(totalTx)}
+          {rows.length === 1 ? t("{count} session", { count: rows.length }) : t("{count} sessions", { count: rows.length })} · ↓ {formatBytes(totalRx)} · ↑ {formatBytes(totalTx)}
         </span>
         <Button variant="ghost" size="sm" onClick={() => void load()} disabled={loading}>
-          <RefreshCw className={loading ? "animate-spin" : ""} /> Refresh
+          <RefreshCw className={loading ? "animate-spin" : ""} /> {t("Refresh")}
         </Button>
       </div>
-      {error && <div className="text-xs text-danger">Refresh failed: {error}</div>}
+      {error && <div className="text-xs text-danger">{t("Refresh failed: {error}", { error })}</div>}
       <div className="overflow-hidden rounded-2xl border border-border bg-surface shadow-card">
         <table className="w-full text-[13px]">
           <thead>
-            <tr className="border-b border-border bg-surface-2/60 text-left text-[11px] font-medium tracking-wide text-faint uppercase">
-              <th className="px-4 py-2">Profile</th>
-              <th className="px-4 py-2">Started</th>
-              <th className="px-4 py-2">Duration</th>
-              <th className="px-4 py-2 text-right">Download</th>
-              <th className="px-4 py-2 text-right">Upload</th>
-              <th className="px-4 py-2">Ended</th>
+            <tr className="border-b border-border bg-surface-2/60 text-start text-[11px] font-medium tracking-wide text-faint uppercase">
+              <th className="px-4 py-2">{t("Profile")}</th>
+              <th className="px-4 py-2">{t("Started")}</th>
+              <th className="px-4 py-2">{t("Duration")}</th>
+              <th className="px-4 py-2 text-end">{t("Download")}</th>
+              <th className="px-4 py-2 text-end">{t("Upload")}</th>
+              <th className="px-4 py-2">{t("Ended")}</th>
             </tr>
           </thead>
           <tbody>
@@ -83,17 +84,17 @@ export function HistoryTable() {
                         {h.profile_name}
                       </button>
                     ) : (
-                      <span className="text-muted" title="Profile has been deleted">
+                      <span className="text-muted" title={t("Profile has been deleted")}>
                         {h.profile_name}
                       </span>
                     )}
                   </td>
                   <td className="px-4 py-2.5 text-muted tabular">{formatDateTime(h.started_at)}</td>
                   <td className="px-4 py-2.5 tabular">
-                    {h.ended_at ? formatDuration(h.ended_at - h.started_at) : <Badge tone="success">Active · {formatDuration(now - h.started_at)}</Badge>}
+                    {h.ended_at ? formatDuration(h.ended_at - h.started_at) : <Badge tone="success">{t("Active · {duration}", { duration: formatDuration(now - h.started_at) })}</Badge>}
                   </td>
-                  <td className="px-4 py-2.5 text-right text-muted tabular">{formatBytes(h.rx_bytes)}</td>
-                  <td className="px-4 py-2.5 text-right text-muted tabular">{formatBytes(h.tx_bytes)}</td>
+                  <td className="px-4 py-2.5 text-end text-muted tabular">{formatBytes(h.rx_bytes)}</td>
+                  <td className="px-4 py-2.5 text-end text-muted tabular">{formatBytes(h.tx_bytes)}</td>
                   <td className="px-4 py-2.5 text-xs text-muted">{h.end_reason ?? (h.ended_at ? "—" : "")}</td>
                 </tr>
               );

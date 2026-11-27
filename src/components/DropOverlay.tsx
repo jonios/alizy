@@ -4,6 +4,7 @@ import { FileDown } from "lucide-react";
 import { api } from "../lib/api";
 import { useImportReport } from "../store/importReport";
 import { useNav } from "../store/nav";
+import { t } from "../i18n";
 
 /** Full-window overlay for dragging .conf files or folders onto Alizy. */
 export function DropOverlay() {
@@ -22,7 +23,7 @@ export function DropOverlay() {
             setOver(false);
             if (p.paths.length) {
               useNav.getState().go("configurations");
-              void useImportReport.getState().run(() => api.importPaths(p.paths), "Imported from drag and drop");
+              void useImportReport.getState().run(() => api.importPaths(p.paths), t("Imported from drag and drop"));
             }
           }
         })
@@ -47,8 +48,8 @@ export function DropOverlay() {
         <div className="mb-5 flex size-16 items-center justify-center rounded-2xl bg-primary text-primary-fg shadow-pop">
           <FileDown className="size-8" />
         </div>
-        <div className="text-lg font-semibold text-fg">Drop to import</div>
-        <div className="mt-1 text-sm text-muted">WireGuard .conf files or folders containing them</div>
+        <div className="text-lg font-semibold text-fg">{t("Drop to import")}</div>
+        <div className="mt-1 text-sm text-muted">{t("WireGuard .conf files or folders containing them")}</div>
       </div>
     </div>
   );

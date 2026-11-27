@@ -3,6 +3,7 @@ import { X } from "lucide-react";
 import { forwardRef, useState, type ComponentPropsWithoutRef, type ElementRef, type HTMLAttributes, type ReactNode } from "react";
 import { cn } from "../../lib/utils";
 import { Button } from "./button";
+import { t } from "../../i18n";
 
 export const Dialog = DialogPrimitive.Root;
 export const DialogTrigger = DialogPrimitive.Trigger;
@@ -43,7 +44,7 @@ export const DialogContent = forwardRef<ElementRef<typeof DialogPrimitive.Conten
           {children}
           {!hideClose && (
             <DialogPrimitive.Close asChild>
-              <Button variant="ghost" size="icon-sm" className="absolute top-3.5 right-3.5" aria-label="Close dialog">
+              <Button variant="ghost" size="icon-sm" className="absolute top-3.5 end-3.5" aria-label={t("Close dialog")}>
                 <X />
               </Button>
             </DialogPrimitive.Close>
@@ -64,7 +65,7 @@ export const SheetContent = forwardRef<
     <DialogPrimitive.Content
       ref={ref}
       className={cn(
-        "sheet-surface fixed inset-y-0 right-0 z-50 flex w-full max-w-[640px] flex-col border-l border-border bg-background shadow-pop outline-none",
+        "sheet-surface fixed inset-y-0 end-0 z-50 flex w-full max-w-[640px] flex-col border-s border-border bg-background shadow-pop outline-none",
         className,
       )}
       {...props}
@@ -76,7 +77,7 @@ export const SheetContent = forwardRef<
 SheetContent.displayName = "SheetContent";
 
 export function DialogHeader({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn("flex flex-col gap-1 px-6 pt-5 pb-4 pr-14", className)} {...props} />;
+  return <div className={cn("flex flex-col gap-1 px-6 pt-5 pb-4 pe-14", className)} {...props} />;
 }
 export function DialogBody({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
   return <div className={cn("min-h-0 flex-1 overflow-y-auto px-6 pb-5", className)} {...props} />;
@@ -124,8 +125,8 @@ export function ConfirmDialog({
   title,
   description,
   children,
-  confirmLabel = "Confirm",
-  cancelLabel = "Cancel",
+  confirmLabel = t("Confirm"),
+  cancelLabel = t("Cancel"),
   destructive,
   onConfirm,
   icon,
@@ -144,7 +145,7 @@ export function ConfirmDialog({
   return (
     <Dialog open={open} onOpenChange={(o) => !busy && onOpenChange(o)}>
       <DialogContent size="sm" hideClose {...(description ? {} : { "aria-describedby": undefined })}>
-        <DialogHeader className="pr-6">
+        <DialogHeader className="pe-6">
           <div className="flex items-start gap-3">
             {icon && (
               <div

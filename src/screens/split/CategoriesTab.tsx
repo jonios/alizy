@@ -8,6 +8,7 @@ import { Badge } from "../../components/ui/badge";
 import type { SplitRule } from "../../lib/types";
 import { targetText } from "./rules";
 import { useRules, useSplit } from "./store";
+import { t } from "../../i18n";
 
 const UNCATEGORIZED = "\u0000none";
 
@@ -27,7 +28,7 @@ export function CategoriesTab() {
   if (rules.length === 0) {
     return (
       <div className="rounded-2xl border-2 border-dashed border-border">
-        <EmptyState icon={<Tags />} title="No rules yet" description="Give rules a category (e.g. Banking, Streaming) to manage them together here." />
+        <EmptyState icon={<Tags />} title={t("No rules yet")} description={t("Give rules a category (e.g. Banking, Streaming) to manage them together here.")} />
       </div>
     );
   }
@@ -38,7 +39,13 @@ export function CategoriesTab() {
         ...c,
         rules: c.rules.map((r) => ((r.category ?? UNCATEGORIZED) === key ? { ...r, enabled } : r)),
       }),
-      `${enabled ? "Enabled" : "Disabled"} ${key === UNCATEGORIZED ? "uncategorized" : `“${key}”`} rules`,
+      key === UNCATEGORIZED
+        ? enabled
+          ? t("Enabled uncategorized rules")
+          : t("Disabled uncategorized rules")
+        : enabled
+          ? t("Enabled “{category}” rules", { category: key })
+          : t("Disabled “{category}” rules", { category: key }),
     );
 
   return (
@@ -54,32 +61,34 @@ export function CategoriesTab() {
                 <Tags className="size-4" />
               </div>
               <div className="min-w-0 flex-1">
-                <div className="truncate text-sm font-medium text-fg">{key === UNCATEGORIZED ? "Uncategorized" : key}</div>
+                <div className="truncate text-sm font-medium text-fg">{key === UNCATEGORIZED ? t("Uncategorized") : key}</div>
                 <div className="text-xs text-muted">
-                  {list.length} rule{list.length === 1 ? "" : "s"} · {on} enabled · {direct} direct
+                  {list.length === 1
+                    ? t("{count} rule · {on} enabled · {direct} direct", { count: list.length, on, direct })
+                    : t("{count} rules · {on} enabled · {direct} direct", { count: list.length, on, direct })}
                 </div>
               </div>
               <Switch
                 checked={allOn}
                 onCheckedChange={(v) => void setAll(key, v)}
-                aria-label={`Toggle all rules in ${key === UNCATEGORIZED ? "uncategorized" : key}`}
+                aria-label={key === UNCATEGORIZED ? t("Toggle all uncategorized rules") : t("Toggle all rules in {category}", { category: key })}
               />
             </div>
             <div className="mt-3 flex flex-wrap gap-1.5">
               {list.slice(0, 12).map((r) => (
-                <Badge key={r.id} tone={r.enabled ? (r.action === "direct" ? "warning" : "primary") : "outline"} className="font-mono">
+                <Badge key={r.id} tone={r.enabled ? (r.action === "direct" ? "warning" : "primary") : "outline"} className="font-mono" dir="ltr">
                   {targetText(r.target)}
                 </Badge>
               ))}
-              {list.length > 12 && <Badge tone="outline">+{list.length - 12} more</Badge>}
+              {list.length > 12 && <Badge tone="outline">{t("+{count} more", { count: list.length - 12 })}</Badge>}
             </div>
             {!allOn && on > 0 && (
               <div className="mt-3 flex gap-2">
                 <Button size="xs" variant="secondary" onClick={() => void setAll(key, true)}>
-                  Enable all
+                  {t("Enable all")}
                 </Button>
                 <Button size="xs" variant="ghost" onClick={() => void setAll(key, false)}>
-                  Disable all
+                  {t("Disable all")}
                 </Button>
               </div>
             )}

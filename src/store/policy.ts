@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { api } from "../lib/api";
 import type { NetworkPolicy } from "../lib/types";
 import { errMsg } from "../lib/utils";
+import { useStatus } from "./status";
 
 interface PolicyState {
   policy: NetworkPolicy | null;
@@ -45,3 +46,18 @@ export const usePolicy = create<PolicyState>((set, get) => ({
     }
   },
 }));
+
+// Follow the policy the service reports. Anything that changes it outside
+// this window (the tray, a service restart, another client) shows up here.
+// Only a *change* in the reported policy is applied, never while a save is in
+// flight, so an optimistic edit isn't reverted by a status poll that predates it.
+let reported: string | null = null;
+useStatus.subscribe((s) => {
+  const p = s.status?.policy;
+  if (!p) return;
+  const json = JSON.stringify(p);
+  if (json === reported) return;
+  reported = json;
+  const st = usePolicy.getState();
+  if (!st.saving && JSON.stringify(st.policy) !== json) usePolicy.setState({ policy: p });
+});

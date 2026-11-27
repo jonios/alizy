@@ -9,7 +9,12 @@ export type ConnectionState =
   | "error"
   | "protected";
 
+/** "tunnel": all traffic through the VPN (kill switch available).
+ * "proxy": only apps using the local SOCKS5/HTTP proxy go through the VPN. */
+export type ConnectionMode = "tunnel" | "proxy";
+
 export interface NetworkPolicy {
+  /** The user's kill-switch preference; it only takes effect in tunnel mode. */
   kill_switch: boolean;
   allow_lan: boolean;
   ipv4_enabled: boolean;
@@ -17,6 +22,22 @@ export interface NetworkPolicy {
   dns_leak_protection: boolean;
   custom_dns: string[];
   auto_reconnect: boolean;
+  /** Absent when the background service predates proxy mode. */
+  mode?: ConnectionMode;
+  proxy_socks_port?: number;
+  proxy_http_port?: number;
+}
+
+/** Proxy mode's local proxy on 127.0.0.1. */
+export interface LocalProxyStatus {
+  active: boolean;
+  socks_port: number;
+  http_port: number;
+  socks_listening: boolean;
+  http_listening: boolean;
+  error?: string | null;
+  /** SOCKS5 UDP ASSOCIATE works with the current tunnel. */
+  udp: boolean;
 }
 
 export interface TunnelStats {
@@ -70,14 +91,19 @@ export interface DaemonStatus {
   tunnel_kind?: string | null;
   /** LAN forward proxy (share this machine's VPN with other devices). */
   lan_proxy?: LanProxyStatus;
+  /** Proxy mode's local proxy; absent when the service predates proxy mode. */
+  local_proxy?: LocalProxyStatus;
 }
 
 /** LAN forward proxy configuration: devices on the local network reach the
- * internet through this machine's tunnel. Phase A has no authentication. */
+ * internet through this machine's tunnel, optionally with a login. */
 export interface LanProxyConfig {
   enabled: boolean;
   port: number;
   socks_port: number;
+  /** null: open to anyone on the network. `password` is sent only to set or
+   * change it; omitted, the service keeps the current one for that username. */
+  auth?: { username: string; password?: string } | null;
 }
 
 /** What the daemon reports about the LAN proxy. */
@@ -97,6 +123,10 @@ export interface LanProxyStatus {
   socks_error?: string | null;
   /** Whether the SOCKS5 listener is accepting connections right now. */
   socks_listening: boolean;
+  /** Username clients must log in with; absent when the proxy is open. */
+  auth_username?: string | null;
+  /** SOCKS5 UDP ASSOCIATE is available. */
+  socks_udp?: boolean;
 }
 
 /** Emitted on "alizy://status" about once per second. */

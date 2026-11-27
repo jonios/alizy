@@ -5,18 +5,19 @@ import type { DomainStatus } from "../../lib/types";
 import { formatDuration, relativeTime } from "../../lib/format";
 import { useNow } from "../../lib/hooks";
 import { cn } from "../../lib/utils";
+import { t } from "../../i18n";
 
 export function DomainStatusLine({ st, enabled, splitOn }: { st: DomainStatus | undefined; enabled: boolean; splitOn: boolean }) {
   const now = useNow(1000);
   const [open, setOpen] = useState(false);
 
   if (!enabled || !splitOn) {
-    return <div className="text-xs text-faint">{!splitOn ? "Split tunneling is off — not resolving." : "Rule disabled — not resolving."}</div>;
+    return <div className="text-xs text-faint">{!splitOn ? t("Split tunneling is off — not resolving.") : t("Rule disabled — not resolving.")}</div>;
   }
   if (!st) {
     return (
       <div className="flex items-center gap-1.5 text-xs text-muted">
-        <Loader2 className="size-3 animate-spin" /> Waiting for first resolution…
+        <Loader2 className="size-3 animate-spin" /> {t("Waiting for first resolution…")}
       </div>
     );
   }
@@ -29,31 +30,33 @@ export function DomainStatusLine({ st, enabled, splitOn }: { st: DomainStatus | 
         type="button"
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
-        className="flex w-full flex-wrap items-center gap-x-3 gap-y-1 rounded text-left text-muted hover:text-fg focus-visible:outline-2 focus-visible:outline-ring"
+        className="flex w-full flex-wrap items-center gap-x-3 gap-y-1 rounded text-start text-muted hover:text-fg focus-visible:outline-2 focus-visible:outline-ring"
       >
-        <ChevronRight className={cn("size-3.5 shrink-0 transition-transform", open && "rotate-90")} />
+        <ChevronRight className={cn("size-3.5 shrink-0 transition-transform rtl:-scale-x-100", open && "rotate-90 rtl:-rotate-90")} />
         <span>
-          <b className="font-medium text-fg">{st.addrs.length}</b> address{st.addrs.length === 1 ? "" : "es"}
-          {stale > 0 && <span className="text-warning"> ({stale} stale)</span>}
+          {st.addrs.length === 1 ? t("{count} address", { count: st.addrs.length }) : t("{count} addresses", { count: st.addrs.length })}
+          {stale > 0 && <span className="text-warning"> {t("({count} stale)", { count: stale })}</span>}
         </span>
-        {st.cnames.length > 0 && <span className="truncate">via CNAME {st.cnames[st.cnames.length - 1]}</span>}
+        {st.cnames.length > 0 && <span className="truncate">{t("via CNAME {name}", { name: st.cnames[st.cnames.length - 1] })}</span>}
         {st.last_error && (
           <span className="inline-flex items-center gap-1 text-danger">
-            <CircleAlert className="size-3" /> resolution error
+            <CircleAlert className="size-3" /> {t("resolution error")}
           </span>
         )}
-        <span className="ml-auto inline-flex items-center gap-1 text-faint">
+        <span className="ms-auto inline-flex items-center gap-1 text-faint">
           <Clock className="size-3" />
-          {st.last_resolved ? `resolved ${relativeTime(st.last_resolved, now)}` : "not resolved"}
-          {st.next_refresh ? ` · refresh ${st.next_refresh > now ? `in ${formatDuration(st.next_refresh - now)}` : "due"}` : ""}
+          {st.last_resolved ? t("resolved {time}", { time: relativeTime(st.last_resolved, now) }) : t("not resolved")}
+          {st.next_refresh
+            ? ` · ${st.next_refresh > now ? t("refresh in {duration}", { duration: formatDuration(st.next_refresh - now) }) : t("refresh due")}`
+            : ""}
         </span>
       </button>
       {open && (
-        <div className="mt-2.5 ml-5 flex flex-col gap-2.5 pb-1">
+        <div className="mt-2.5 ms-5 flex flex-col gap-2.5 pb-1">
           {st.cnames.length > 0 && (
             <div>
-              <div className="mb-1 text-faint">CNAME chain</div>
-              <div className="selectable flex flex-wrap items-center gap-1 font-mono text-[11px] text-fg">
+              <div className="mb-1 text-faint">{t("CNAME chain")}</div>
+              <div className="selectable flex flex-wrap items-center gap-1 font-mono text-[11px] text-fg" dir="ltr">
                 <span>{st.domain}</span>
                 {st.cnames.map((c) => (
                   <span key={c} className="flex items-center gap-1">
@@ -73,12 +76,12 @@ export function DomainStatusLine({ st, enabled, splitOn }: { st: DomainStatus | 
                 const ttl = a.expires_at - now;
                 return (
                   <div key={a.ip} className="flex items-center justify-between gap-2 rounded-md border border-border bg-surface-2/60 px-2 py-1">
-                    <span className="selectable truncate font-mono text-[11px] text-fg">{a.ip}</span>
+                    <span className="selectable truncate font-mono text-[11px] text-fg" dir="ltr">{a.ip}</span>
                     {a.stale ? (
-                      <Badge tone="warning">stale</Badge>
+                      <Badge tone="warning">{t("stale")}</Badge>
                     ) : (
                       <span className={cn("text-[11px] tabular", ttl < 30 ? "text-warning" : "text-faint")}>
-                        TTL {ttl > 0 ? formatDuration(ttl) : "expired"}
+                        {ttl > 0 ? t("TTL {duration}", { duration: formatDuration(ttl) }) : t("TTL expired")}
                       </span>
                     )}
                   </div>
@@ -86,9 +89,9 @@ export function DomainStatusLine({ st, enabled, splitOn }: { st: DomainStatus | 
               })}
             </div>
           ) : (
-            <div className="text-faint">No addresses resolved.</div>
+            <div className="text-faint">{t("No addresses resolved.")}</div>
           )}
-          <div className="text-faint">Source: {st.source}</div>
+          <div className="text-faint">{t("Source: {source}", { source: st.source })}</div>
         </div>
       )}
     </div>

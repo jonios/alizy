@@ -32,6 +32,7 @@ import { toast } from "../../store/toast";
 import { DeleteProfileDialog, ExportDialog, RenameDialog } from "./dialogs";
 import { PingBadge } from "./PingBadge";
 import { SshProfileDialog } from "./SshProfileDialog";
+import { t } from "../../i18n";
 
 export function ProfileRow({ p, now }: { p: ProfileSummary; now: number }) {
   const status = useStatus((s) => s.status);
@@ -51,16 +52,16 @@ export function ProfileRow({ p, now }: { p: ProfileSummary; now: number }) {
       await api.setFavorite(p.id, !p.favorite);
       void useProfiles.getState().load();
     } catch (e) {
-      toast.error("Could not update favorite", e);
+      toast.error(t("Could not update favorite"), e);
     }
   };
   const duplicate = async () => {
     try {
       const copy = await api.duplicate(p.id);
-      toast.success("Profile duplicated", copy.name);
+      toast.success(t("Profile duplicated"), copy.name);
       void useProfiles.getState().load();
     } catch (e) {
-      toast.error("Could not duplicate profile", e);
+      toast.error(t("Could not duplicate profile"), e);
     }
   };
 
@@ -71,11 +72,11 @@ export function ProfileRow({ p, now }: { p: ProfileSummary; now: number }) {
         isActive ? "border-primary/30 bg-primary/[0.05]" : "border-border bg-surface hover:border-border-strong",
       )}
     >
-      <Tooltip content={p.favorite ? "Remove from favorites" : "Add to favorites"}>
+      <Tooltip content={p.favorite ? t("Remove from favorites") : t("Add to favorites")}>
         <button
           type="button"
           onClick={toggleFavorite}
-          aria-label={p.favorite ? `Remove ${p.name} from favorites` : `Add ${p.name} to favorites`}
+          aria-label={p.favorite ? t("Remove {name} from favorites", { name: p.name }) : t("Add {name} to favorites", { name: p.name })}
           aria-pressed={p.favorite}
           className="flex size-8 items-center justify-center rounded-lg text-faint transition-colors hover:bg-surface-2 hover:text-warning focus-visible:outline-2 focus-visible:outline-ring"
         >
@@ -86,42 +87,44 @@ export function ProfileRow({ p, now }: { p: ProfileSummary; now: number }) {
       <button
         type="button"
         onClick={() => openDetails(p.id)}
-        className="min-w-0 text-left focus-visible:outline-2 focus-visible:outline-ring rounded-md"
-        aria-label={`Open details for ${p.name}`}
+        className="min-w-0 text-start focus-visible:outline-2 focus-visible:outline-ring rounded-md"
+        aria-label={t("Open details for {name}", { name: p.name })}
       >
         <div className="flex min-w-0 items-center gap-2">
           <span className="truncate text-sm font-medium text-fg">{p.name}</span>
           {tone && status && (
             <span className={cn("inline-flex items-center gap-1.5 text-xs font-medium", TONE_TEXT[tone])}>
               <Dot className={TONE_BG[tone]} pulse={isBusyState(status.state) || status.state === "connected"} />
-              {STATE_LABEL[status.state]}
+              {t(STATE_LABEL[status.state])}
             </span>
           )}
           {p.category && <Badge tone="outline">{p.category}</Badge>}
         </div>
         <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs text-faint">
-          <span className="font-mono">{endpointLabel(p) ?? "no endpoint"}</span>
+          <span className="font-mono" dir="ltr">
+            {endpointLabel(p) ?? t("no endpoint")}
+          </span>
           {(p.endpoint || p.ssh) && <PingBadge id={p.id} />}
           {isSsh ? (
             <span className="flex items-center gap-1">
               <Badge tone="primary">SSH</Badge>
-              {p.password_needed && <Badge tone="warning">Password needed</Badge>}
+              {p.password_needed && <Badge tone="warning">{t("Password needed")}</Badge>}
             </span>
           ) : (
             <span className="flex items-center gap-1">
               {p.has_ipv4 && <Badge tone="neutral">IPv4</Badge>}
               {p.has_ipv6 && <Badge tone="neutral">IPv6</Badge>}
-              {p.full_tunnel ? <Badge tone="primary">Full tunnel</Badge> : <Badge tone="outline">Partial routes</Badge>}
+              {p.full_tunnel ? <Badge tone="primary">{t("Full tunnel")}</Badge> : <Badge tone="outline">{t("Partial routes")}</Badge>}
             </span>
           )}
-          <span>Last used {relativeTime(p.last_connected_at, now)}</span>
+          <span>{t("Last used {time}", { time: relativeTime(p.last_connected_at, now) })}</span>
         </div>
       </button>
 
       <div className="flex items-center gap-1.5">
         {isActive ? (
           <Button size="sm" variant="secondary" onClick={() => disconnect()} loading={pending === "disconnect"} disabled={daemonDown}>
-            <Unplug /> Disconnect
+            <Unplug /> {t("Disconnect")}
           </Button>
         ) : (
           <Button
@@ -132,40 +135,40 @@ export function ProfileRow({ p, now }: { p: ProfileSummary; now: number }) {
             disabled={daemonDown || (pending !== null && pending !== p.id)}
             className="opacity-90 group-hover:opacity-100"
           >
-            <Plug /> Connect
+            <Plug /> {t("Connect")}
           </Button>
         )}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="icon" aria-label={`More actions for ${p.name}`}>
+            <Button variant="ghost" size="icon" aria-label={t("More actions for {name}", { name: p.name })}>
               <MoreHorizontal />
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent>
             <DropdownMenuItem onSelect={() => openDetails(p.id)}>
-              <Info /> Details
+              <Info /> {t("Details")}
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={toggleFavorite}>
-              <Star /> {p.favorite ? "Unfavorite" : "Favorite"}
+              <Star /> {p.favorite ? t("Unfavorite") : t("Favorite")}
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => setDialog("rename")}>
-              <Pencil /> Rename…
+              <Pencil /> {t("Rename…")}
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={duplicate}>
-              <CopyPlus /> Duplicate
+              <CopyPlus /> {t("Duplicate")}
             </DropdownMenuItem>
             {isSsh ? (
               <DropdownMenuItem onSelect={() => setDialog("ssh")}>
-                <Pencil /> Edit connection…
+                <Pencil /> {t("Edit connection…")}
               </DropdownMenuItem>
             ) : (
               <DropdownMenuItem onSelect={() => setDialog("export")}>
-                <Download /> Export…
+                <Download /> {t("Export…")}
               </DropdownMenuItem>
             )}
             <DropdownMenuSeparator />
             <DropdownMenuItem destructive onSelect={() => setDialog("delete")}>
-              <Trash2 /> Delete…
+              <Trash2 /> {t("Delete…")}
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>

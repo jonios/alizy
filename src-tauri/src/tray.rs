@@ -12,8 +12,8 @@ use tauri::{AppHandle, Emitter, Manager};
 
 const TRAY_ID: &str = "alizy-tray";
 
-/// (state, profile, profile-list signature) of the last rendered menu.
-type MenuKey = (Option<St>, Option<String>, String);
+/// (state, profile, profile-list signature, Persian) of the last rendered menu.
+type MenuKey = (Option<St>, Option<String>, String, bool);
 static LAST: Mutex<Option<MenuKey>> = Mutex::new(None);
 
 /// Libraries the tray backend loads at runtime on Linux.
@@ -106,19 +106,43 @@ fn handle_menu(app: &AppHandle, id: &str) {
     }
 }
 
-fn state_label(s: Option<&DaemonStatus>) -> String {
+/// The tray's few strings; the GUI's own translations live in src/i18n.
+fn tr(fa: bool, en: &'static str) -> &'static str {
+    if !fa {
+        return en;
+    }
+    match en {
+        "Service unavailable" => "سرویس در دسترس نیست",
+        "Connected" => "متصل",
+        "Connecting…" => "در حال اتصال…",
+        "Reconnecting…" => "در حال اتصال دوباره…",
+        "Disconnecting…" => "در حال قطع اتصال…",
+        "Protected · kill switch active" => "محافظت‌شده · کیل‌سوییچ فعال است",
+        "Error" => "خطا",
+        "Disconnected" => "قطع",
+        "Switch profile" => "تغییر پروفایل",
+        "Connect" => "اتصال",
+        "Disconnect" => "قطع اتصال",
+        "Open Alizy" => "باز کردن Alizy",
+        "Settings…" => "تنظیمات…",
+        "Quit Alizy (protection keeps running)" => "خروج از Alizy (محافظت ادامه دارد)",
+        other => other,
+    }
+}
+
+fn state_label(s: Option<&DaemonStatus>, fa: bool) -> String {
     match s {
-        None => "Service unavailable".into(),
+        None => tr(fa, "Service unavailable").into(),
         Some(s) => {
             let name = s.profile_name.as_deref().unwrap_or("");
             match s.state {
-                St::Connected => format!("Connected · {name}"),
-                St::Connecting => "Connecting…".into(),
-                St::Reconnecting => "Reconnecting…".into(),
-                St::Disconnecting => "Disconnecting…".into(),
-                St::Protected => "Protected · kill switch active".into(),
-                St::Error => "Error".into(),
-                St::Disconnected => "Disconnected".into(),
+                St::Connected => format!("{} · {name}", tr(fa, "Connected")),
+                St::Connecting => tr(fa, "Connecting…").into(),
+                St::Reconnecting => tr(fa, "Reconnecting…").into(),
+                St::Disconnecting => tr(fa, "Disconnecting…").into(),
+                St::Protected => tr(fa, "Protected · kill switch active").into(),
+                St::Error => tr(fa, "Error").into(),
+                St::Disconnected => tr(fa, "Disconnected").into(),
             }
         }
     }
@@ -133,7 +157,13 @@ pub async fn update(app: &AppHandle, status: Option<&DaemonStatus>) {
         .iter()
         .map(|p| format!("{}:{}:{};", p.id, p.name, p.favorite))
         .collect();
-    let key = (status.map(|s| s.state), status.and_then(|s| s.profile_id.clone()), sig);
+    let fa = st.settings.read().await.language == "fa";
+    let key = (
+        status.map(|s| s.state),
+        status.and_then(|s| s.profile_id.clone()),
+        sig,
+        fa,
+    );
     {
         let mut last = LAST.lock().unwrap();
         if last.as_ref() == Some(&key) {
@@ -141,7 +171,7 @@ pub async fn update(app: &AppHandle, status: Option<&DaemonStatus>) {
         }
         *last = Some(key);
     }
-    let label = state_label(status);
+    let label = state_label(status, fa);
     let _ = tray.set_tooltip(Some(format!("Alizy — {label}")));
     let build = || -> tauri::Result<Menu<tauri::Wry>> {
         let header = MenuItem::with_id(app, "status", &label, false, None::<&str>)?;
@@ -150,7 +180,7 @@ pub async fn update(app: &AppHandle, status: Option<&DaemonStatus>) {
         let sub = Submenu::with_id(
             app,
             "profiles",
-            if connected { "Switch profile" } else { "Connect" },
+            tr(fa, if connected { "Switch profile" } else { "Connect" }),
             !profiles.is_empty(),
         )?;
         let mut sorted: Vec<_> = profiles.iter().collect();
@@ -174,13 +204,19 @@ pub async fn update(app: &AppHandle, status: Option<&DaemonStatus>) {
         let disc = MenuItem::with_id(
             app,
             "disconnect",
-            "Disconnect",
+            tr(fa, "Disconnect"),
             connected || status.map(|s| s.state == St::Error).unwrap_or(false),
             None::<&str>,
         )?;
-        let open = MenuItem::with_id(app, "open", "Open Alizy", true, None::<&str>)?;
-        let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
-        let quit = MenuItem::with_id(app, "quit", "Quit Alizy (protection keeps running)", true, None::<&str>)?;
+        let open = MenuItem::with_id(app, "open", tr(fa, "Open Alizy"), true, None::<&str>)?;
+        let settings = MenuItem::with_id(app, "settings", tr(fa, "Settings…"), true, None::<&str>)?;
+        let quit = MenuItem::with_id(
+            app,
+            "quit",
+            tr(fa, "Quit Alizy (protection keeps running)"),
+            true,
+            None::<&str>,
+        )?;
         Menu::with_items(
             app,
             &[

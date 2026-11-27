@@ -3,6 +3,7 @@ import { api } from "../lib/api";
 import type { PingResult } from "../lib/types";
 import { errMsg } from "../lib/utils";
 import { toast } from "./toast";
+import { t } from "../i18n";
 
 /** Last known probe of one profile's endpoint. */
 export interface PingEntry {
@@ -41,7 +42,7 @@ export const usePing = create<PingState>((set, get) => ({
       set({ results: { ...get().results, ...fresh }, busy: false });
     } catch (e) {
       set({ error: errMsg(e), busy: false });
-      toast.error("Couldn’t measure the pings", e);
+      toast.error(t("Couldn’t measure the pings"), e);
     }
   },
 }));

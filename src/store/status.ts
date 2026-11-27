@@ -3,6 +3,7 @@ import { api } from "../lib/api";
 import type { DaemonStatus, StatusEvent } from "../lib/types";
 import { toast } from "./toast";
 import { isConnectError, useSshFlow } from "./sshFlow";
+import { t } from "../i18n";
 
 export interface RatePoint {
   t: number;
@@ -99,12 +100,12 @@ export const useStatus = create<StatusState>((set, get) => ({
         } else if (e.code === "cancelled") {
           // Superseded by a disconnect or another connect: nothing to report.
         } else if (e.code === "auth_failed") {
-          toast.error("Could not connect", "Authentication failed: check the username and password.");
+          toast.error(t("Could not connect"), t("Authentication failed: check the username and password."));
         } else {
-          toast.error("Could not connect", e.message);
+          toast.error(t("Could not connect"), e.message);
         }
       } else {
-        toast.error("Could not connect", e);
+        toast.error(t("Could not connect"), e);
       }
     } finally {
       set({ pending: null });
@@ -116,7 +117,7 @@ export const useStatus = create<StatusState>((set, get) => ({
     try {
       await api.disconnect();
     } catch (e) {
-      toast.error("Could not disconnect", e);
+      toast.error(t("Could not disconnect"), e);
     } finally {
       set({ pending: null });
     }

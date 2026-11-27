@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+### New
+- **Proxy mode** (Network → Connection mode). The tunnel comes up without touching
+  system routes or DNS; a local SOCKS5 (`127.0.0.1:10808`, with UDP) and HTTP
+  (`127.0.0.1:10809`) proxy carries only the apps you point at it. While the VPN is
+  down the proxy refuses connections instead of going direct, and the firewall rejects
+  proxy traffic on any interface but the tunnel. **Tunnel mode** (all traffic, as
+  before) stays the default. Switching modes reconnects and cleans up the previous
+  mode's routes, rules and DNS first.
+- **Kill switch only in tunnel mode.** In proxy mode it is inactive and shown as such;
+  the setting is kept and returns with tunnel mode.
+- **VPN sharing: UDP and login.** The SOCKS5 proxy now supports UDP ASSOCIATE (relay on
+  the same port; replies pass the kill switch like TCP). Optional username/password for
+  both proxies (SOCKS5 RFC 1929, HTTP `Proxy-Authorization: Basic`); the service stores
+  only a salted SHA-256 verifier.
+- **Persian** interface (Settings → Language), right-to-left, also in the tray menu.
+  English stays the default. `README.fa.md`.
+
+### Internal
+- Protocol adapter layer: WireGuard and SSH run as drivers behind one connection
+  lifecycle (`alizyd::driver`, `alizy-core::protocol`); the IPC wire format is unchanged.
+  Design and the plan for sing-box and subscriptions: `docs/MULTI_PROTOCOL.md`.
+- CI rejects AI co-author attribution in commit messages (`scripts/check-attribution.sh`);
+  `npm run build` fails when a UI string lacks a Persian translation.
+
+### Fixes
 - Installer: the upgrade plan and status now report the kill switch from its saved
   setting. 0.2.1 said "nothing leaks" during the service restart whenever Alizy's
   firewall table existed, which is also the case with the kill switch off while a

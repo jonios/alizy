@@ -5,7 +5,7 @@ import { useNav } from "../store/nav";
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "./ui/dialog";
 import { Button } from "./ui/button";
 import { cn } from "../lib/utils";
-import { plural } from "../lib/format";
+import { t } from "../i18n";
 
 export function ImportReportDialog() {
   const { report, title, close } = useImportReport();
@@ -20,11 +20,18 @@ export function ImportReportDialog() {
 
   const summary =
     imported.length === 0 && errors.length === 0 && duplicates.length === 0
-      ? "Nothing was found to import."
-      : `${plural(imported.length, "profile")} imported` +
-        (duplicates.length ? `, ${plural(duplicates.length, "duplicate")} skipped` : "") +
-        (errors.length ? `, ${plural(errors.length, "error")}` : "") +
-        ".";
+      ? t("Nothing was found to import.")
+      : [
+          imported.length === 1 ? t("{count} profile imported", { count: imported.length }) : t("{count} profiles imported", { count: imported.length }),
+          duplicates.length
+            ? duplicates.length === 1
+              ? t("{count} duplicate skipped", { count: duplicates.length })
+              : t("{count} duplicates skipped", { count: duplicates.length })
+            : "",
+          errors.length ? (errors.length === 1 ? t("{count} error", { count: errors.length }) : t("{count} errors", { count: errors.length })) : "",
+        ]
+          .filter(Boolean)
+          .join(t(", ")) + t(".");
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && close()}>
@@ -35,28 +42,28 @@ export function ImportReportDialog() {
         </DialogHeader>
         <DialogBody className="flex flex-col gap-4">
           <div className="grid grid-cols-4 gap-2">
-            <Stat label="Imported" value={imported.length} tone="success" />
-            <Stat label="Duplicates" value={duplicates.length} tone="neutral" />
-            <Stat label="Errors" value={errors.length} tone="danger" />
-            <Stat label="Warnings" value={warnCount} tone="warning" />
+            <Stat label={t("Imported")} value={imported.length} tone="success" />
+            <Stat label={t("Duplicates")} value={duplicates.length} tone="neutral" />
+            <Stat label={t("Errors")} value={errors.length} tone="danger" />
+            <Stat label={t("Warnings")} value={warnCount} tone="warning" />
           </div>
 
           {imported.length > 0 && (
-            <Section icon={<CircleCheck className="text-success" />} title="Imported">
+            <Section icon={<CircleCheck className="text-success" />} title={t("Imported")}>
               {imported.map((p) => (
                 <Row key={p.id}>
                   <span className="truncate font-medium text-fg">{p.name}</span>
-                  <span className="truncate text-faint">{p.endpoint ?? "no endpoint"}</span>
+                  <span dir="ltr" className="truncate text-faint">{p.endpoint ?? t("no endpoint")}</span>
                   <Button
                     variant="link"
                     size="xs"
-                    className="ml-auto"
+                    className="ms-auto"
                     onClick={() => {
                       close();
                       openDetails(p.id);
                     }}
                   >
-                    Details
+                    {t("Details")}
                   </Button>
                 </Row>
               ))}
@@ -64,11 +71,11 @@ export function ImportReportDialog() {
           )}
 
           {warnings.length > 0 && (
-            <Section icon={<TriangleAlert className="text-warning" />} title="Warnings — review these">
+            <Section icon={<TriangleAlert className="text-warning" />} title={t("Warnings — review these")}>
               {warnings.map((w, i) => (
                 <div key={i} className="rounded-lg border border-warning/25 bg-warning/[0.06] px-3 py-2">
-                  <div className="truncate font-mono text-[11px] text-muted">{w.source}</div>
-                  <ul className="mt-1 list-disc space-y-0.5 pl-4 text-[13px] text-fg">
+                  <div dir="ltr" className="truncate text-start font-mono text-[11px] text-muted">{w.source}</div>
+                  <ul className="mt-1 list-disc space-y-0.5 ps-4 text-[13px] text-fg">
                     {w.messages.map((m, j) => (
                       <li key={j}>{m}</li>
                     ))}
@@ -79,21 +86,21 @@ export function ImportReportDialog() {
           )}
 
           {duplicates.length > 0 && (
-            <Section icon={<CopyIcon className="text-muted" />} title="Skipped duplicates">
+            <Section icon={<CopyIcon className="text-muted" />} title={t("Skipped duplicates")}>
               {duplicates.map((d, i) => (
                 <Row key={i}>
                   <span className="truncate font-medium text-fg">{d.name}</span>
-                  <span className="truncate font-mono text-[11px] text-faint">{d.source}</span>
+                  <span dir="ltr" className="truncate font-mono text-[11px] text-faint">{d.source}</span>
                   <Button
                     variant="link"
                     size="xs"
-                    className="ml-auto"
+                    className="ms-auto"
                     onClick={() => {
                       close();
                       openDetails(d.existing_id);
                     }}
                   >
-                    View existing
+                    {t("View existing")}
                   </Button>
                 </Row>
               ))}
@@ -101,10 +108,10 @@ export function ImportReportDialog() {
           )}
 
           {errors.length > 0 && (
-            <Section icon={<CircleAlert className="text-danger" />} title="Errors">
+            <Section icon={<CircleAlert className="text-danger" />} title={t("Errors")}>
               {errors.map((e, i) => (
                 <div key={i} className="rounded-lg border border-danger/25 bg-danger/[0.06] px-3 py-2">
-                  <div className="truncate font-mono text-[11px] text-muted">{e.source}</div>
+                  <div dir="ltr" className="truncate text-start font-mono text-[11px] text-muted">{e.source}</div>
                   <div className="selectable mt-0.5 text-[13px] text-fg">{e.message}</div>
                 </div>
               ))}
@@ -114,13 +121,13 @@ export function ImportReportDialog() {
           {imported.length === 0 && errors.length === 0 && duplicates.length === 0 && (
             <div className="flex flex-col items-center gap-2 py-6 text-center text-[13px] text-muted">
               <FileWarning className="size-6 text-faint" />
-              No WireGuard configuration files were found in the selection.
+              {t("No WireGuard configuration files were found in the selection.")}
             </div>
           )}
         </DialogBody>
         <DialogFooter>
           <Button variant="primary" onClick={close}>
-            Done
+            {t("Done")}
           </Button>
         </DialogFooter>
       </DialogContent>

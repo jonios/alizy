@@ -19,6 +19,7 @@ import { useNav } from "../../store/nav";
 import { useStatus } from "../../store/status";
 import { toast } from "../../store/toast";
 import { SystemCheck } from "./SystemCheck";
+import { LANGS, t } from "../../i18n";
 
 export function GeneralSettings() {
   const { settings, settingsError, update, loadSettings, saving } = useSettings();
@@ -27,22 +28,22 @@ export function GeneralSettings() {
 
   useEffect(() => {
     if (!focus) return;
-    const t = window.setTimeout(() => {
+    const timer = window.setTimeout(() => {
       document.getElementById(focus)?.scrollIntoView({ behavior: "smooth", block: "start" });
       clearFocus();
     }, 120);
-    return () => window.clearTimeout(t);
+    return () => window.clearTimeout(timer);
   }, [focus, clearFocus]);
 
   return (
     <>
       <ScreenHeader
-        title="Settings"
-        description="Startup, appearance and app information."
+        title={t("Settings")}
+        description={t("Startup, appearance and app information.")}
         actions={
           saving ? (
             <span className="flex items-center gap-1.5 text-xs text-muted">
-              <RefreshCw className="size-3.5 animate-spin" /> Saving…
+              <RefreshCw className="size-3.5 animate-spin" /> {t("Saving…")}
             </span>
           ) : null
         }
@@ -53,11 +54,11 @@ export function GeneralSettings() {
             <EmptyState
               tone="danger"
               icon={<CircleX />}
-              title="Settings unavailable"
+              title={t("Settings unavailable")}
               description={<span className="selectable">{settingsError}</span>}
               action={
                 <Button size="sm" variant="secondary" onClick={() => void loadSettings()}>
-                  <RefreshCw /> Try again
+                  <RefreshCw /> {t("Try again")}
                 </Button>
               }
             />
@@ -68,38 +69,44 @@ export function GeneralSettings() {
           <>
             <StartupCard />
             <Card className="overflow-hidden">
-              <CardHeader icon={<Palette />} title="Appearance & behaviour" />
+              <CardHeader icon={<Palette />} title={t("Appearance & behaviour")} />
               <Divider />
-              <SettingRow title="Theme" description="Follow the system or pick a fixed look." control={<ThemePicker value={settings.theme} onChange={(theme) => void update({ theme })} />} />
+              <SettingRow title={t("Theme")} description={t("Follow the system or pick a fixed look.")} control={<ThemePicker value={settings.theme} onChange={(theme) => void update({ theme })} />} />
               <Divider className="mx-5" />
               <SettingRow
-                title="Language"
+                title={t("Language")}
                 control={
-                  <Select value="en" onValueChange={() => {}} aria-label="Language" className="w-40" options={[{ value: "en", label: "English" }]} />
+                  <Select
+                    value={settings.language}
+                    onValueChange={(language) => void update({ language })}
+                    aria-label={t("Language")}
+                    className="w-40"
+                    options={LANGS}
+                  />
                 }
-                description="More languages may be added in future releases."
+                description={t("English is the default. Persian switches the interface to right-to-left.")}
               />
               <Divider className="mx-5" />
               <SettingRow
                 htmlFor="notifications"
-                title="Notifications"
-                description="Desktop notifications when the connection state changes or the kill switch engages."
+                title={t("Notifications")}
+                description={t("Desktop notifications when the connection state changes or the kill switch engages.")}
                 control={<Switch id="notifications" checked={settings.notifications} onCheckedChange={(v) => void update({ notifications: v })} />}
               />
               <Divider className="mx-5" />
               <SettingRow
                 htmlFor="public-ip"
-                title="Show public IP on the dashboard"
-                description="Looks up your public address by contacting api.ipify.org — an external service that will see your IP."
+                title={t("Show public IP on the dashboard")}
+                description={t("Looks up your public address by contacting api.ipify.org — an external service that will see your IP.")}
                 control={<Switch id="public-ip" checked={settings.show_public_ip} onCheckedChange={(v) => void update({ show_public_ip: v })} />}
               />
               <Divider className="mx-5" />
               <SettingRow
                 htmlFor="auto-updates"
-                title="Automatic updates"
-                description="No update channel is configured for this build"
+                title={t("Automatic updates")}
+                description={t("No update channel is configured for this build")}
                 disabled
-                control={<Switch id="auto-updates" checked={false} disabled aria-label="Automatic updates (unavailable)" />}
+                control={<Switch id="auto-updates" checked={false} disabled aria-label={t("Automatic updates (unavailable)")} />}
               />
             </Card>
           </>
@@ -120,19 +127,19 @@ function StartupCard() {
   const trayOff = appInfo ? !appInfo.tray_available : false;
   return (
     <Card className="overflow-hidden">
-      <CardHeader icon={<Power />} title="Startup & window" />
+      <CardHeader icon={<Power />} title={t("Startup & window")} />
       <Divider />
       <SettingRow
         htmlFor="launch-startup"
-        title="Launch at startup"
-        description="Open Alizy when you log in."
+        title={t("Launch at startup")}
+        description={t("Open Alizy when you log in.")}
         control={<Switch id="launch-startup" checked={settings.launch_at_startup} onCheckedChange={(v) => void update({ launch_at_startup: v })} />}
       />
       <Divider className="mx-5" />
       <SettingRow
         htmlFor="start-min"
-        title="Start minimized"
-        description="Start hidden in the system tray instead of showing the window."
+        title={t("Start minimized")}
+        description={t("Start hidden in the system tray instead of showing the window.")}
         disabled={trayOff}
         control={
           <Switch id="start-min" checked={settings.start_minimized && !trayOff} disabled={trayOff} onCheckedChange={(v) => void update({ start_minimized: v })} />
@@ -141,11 +148,11 @@ function StartupCard() {
       <Divider className="mx-5" />
       <SettingRow
         htmlFor="close-tray"
-        title="Minimize / close to system tray"
+        title={t("Minimize / close to system tray")}
         description={
           trayOff
-            ? "Unavailable: no system tray was detected on this desktop. Closing the window quits the UI (the protection service keeps running)."
-            : "Closing the window keeps Alizy running in the tray."
+            ? t("Unavailable: no system tray was detected on this desktop. Closing the window quits the UI (the protection service keeps running).")
+            : t("Closing the window keeps Alizy running in the tray.")
         }
         disabled={trayOff}
         control={
@@ -158,12 +165,12 @@ function StartupCard() {
 
 function ThemePicker({ value, onChange }: { value: Theme; onChange: (t: Theme) => void }) {
   const opts: { v: Theme; label: string; Icon: typeof Sun }[] = [
-    { v: "light", label: "Light", Icon: Sun },
-    { v: "dark", label: "Dark", Icon: Moon },
-    { v: "system", label: "System", Icon: Monitor },
+    { v: "light", label: t("Light"), Icon: Sun },
+    { v: "dark", label: t("Dark"), Icon: Moon },
+    { v: "system", label: t("System"), Icon: Monitor },
   ];
   return (
-    <div role="radiogroup" aria-label="Theme" className="inline-flex rounded-xl border border-border bg-surface-2/70 p-1">
+    <div role="radiogroup" aria-label={t("Theme")} className="inline-flex rounded-xl border border-border bg-surface-2/70 p-1">
       {opts.map(({ v, label, Icon }) => (
         <button
           key={v}
@@ -190,9 +197,9 @@ function AboutCard() {
     <Card className="overflow-hidden">
       <CardHeader
         icon={<Info />}
-        title="About"
+        title={t("About")}
         action={
-          <Button size="icon-sm" variant="ghost" onClick={() => void loadAppInfo()} aria-label="Refresh app information" disabled={appInfoLoading}>
+          <Button size="icon-sm" variant="ghost" onClick={() => void loadAppInfo()} aria-label={t("Refresh app information")} disabled={appInfoLoading}>
             <RefreshCw className={appInfoLoading ? "animate-spin" : ""} />
           </Button>
         }
@@ -200,7 +207,7 @@ function AboutCard() {
       {!appInfo ? (
         appInfoError ? (
           <div className="px-5 pb-5">
-            <Alert tone="danger" title="App information unavailable">
+            <Alert tone="danger" title={t("App information unavailable")}>
               <span className="selectable">{appInfoError}</span>
             </Alert>
           </div>
@@ -212,28 +219,28 @@ function AboutCard() {
       ) : (
         <div className="flex flex-col gap-3 px-5 pb-5">
           <div className="divide-y divide-border rounded-xl border border-border px-4">
-            <InfoRow label="Alizy version">
-              <span className="font-mono text-[12px]">{appInfo.version}</span>
+            <InfoRow label={t("Alizy version")}>
+              <span dir="ltr" className="font-mono text-[12px]">{appInfo.version}</span>
             </InfoRow>
-            <InfoRow label="Platform">{appInfo.platform}</InfoRow>
-            <InfoRow label="Desktop environment">{appInfo.desktop ?? "Unknown"}</InfoRow>
-            <InfoRow label="Background service (alizyd)">
+            <InfoRow label={t("Platform")}>{appInfo.platform}</InfoRow>
+            <InfoRow label={t("Desktop environment")}>{appInfo.desktop ?? t("Unknown")}</InfoRow>
+            <InfoRow label={t("Background service (alizyd)")}>
               {appInfo.daemon.reachable ? (
                 <span className="inline-flex items-center gap-1.5 text-success">
-                  <CircleCheck className="size-3.5" /> Reachable
-                  <span className="font-mono text-[12px] text-muted">v{appInfo.daemon.version ?? daemonVersion ?? "?"}</span>
+                  <CircleCheck className="size-3.5" /> {t("Reachable")}
+                  <span dir="ltr" className="font-mono text-[12px] text-muted">v{appInfo.daemon.version ?? daemonVersion ?? "?"}</span>
                 </span>
               ) : (
                 <span className="inline-flex items-center gap-1.5 text-danger">
-                  <CircleX className="size-3.5" /> Not reachable
+                  <CircleX className="size-3.5" /> {t("Not reachable")}
                 </span>
               )}
             </InfoRow>
-            <InfoRow label="Secret storage">
+            <InfoRow label={t("Secret storage")}>
               {appInfo.secret_backend === "keyring" ? (
-                <Badge tone="success">System keyring (Secret Service)</Badge>
+                <Badge tone="success">{t("System keyring (Secret Service)")}</Badge>
               ) : appInfo.secret_backend === "file" ? (
-                <Badge tone="warning">Protected file (0600)</Badge>
+                <Badge tone="warning">{t("Protected file (0600)")}</Badge>
               ) : (
                 <Badge>{appInfo.secret_backend}</Badge>
               )}
@@ -242,21 +249,24 @@ function AboutCard() {
           {appInfo.daemon.reachable &&
             (appInfo.daemon.version ?? daemonVersion) !== null &&
             (appInfo.daemon.version ?? daemonVersion) !== appInfo.version && (
-              <Alert tone="warning" icon={<TriangleAlert />} title="App and service versions differ">
-                This app is v{appInfo.version}, the background service is v{appInfo.daemon.version ?? daemonVersion}. Run the matching{" "}
-                <code className="font-mono">alizy-installer</code> from the release page to update both together.
+              <Alert tone="warning" icon={<TriangleAlert />} title={t("App and service versions differ")}>
+                {t("This app is v{app}, the background service is v{service}. Run the matching alizy-installer from the release page to update both together.", {
+                  app: appInfo.version,
+                  service: appInfo.daemon.version ?? daemonVersion ?? "?",
+                })}
               </Alert>
             )}
           <UpdateCheck />
           {!appInfo.daemon.reachable && appInfo.daemon.error && (
-            <Alert tone="danger" title="Service error">
+            <Alert tone="danger" title={t("Service error")}>
               <span className="selectable">{appInfo.daemon.error}</span>
             </Alert>
           )}
           {appInfo.secret_backend === "file" && (
-            <Alert tone="warning" icon={<TriangleAlert />} title="Private keys are stored in a file">
-              No Secret Service (e.g. GNOME Keyring or KWallet) was found, so private keys are kept in a file readable only by your user
-              (permissions 0600). Install and unlock a keyring for stronger protection.
+            <Alert tone="warning" icon={<TriangleAlert />} title={t("Private keys are stored in a file")}>
+              {t(
+                "No Secret Service (e.g. GNOME Keyring or KWallet) was found, so private keys are kept in a file readable only by your user (permissions 0600). Install and unlock a keyring for stronger protection.",
+              )}
             </Alert>
           )}
         </div>
@@ -286,26 +296,24 @@ function UpdateCheck() {
       <div className="min-w-0 flex-1 text-[13px]">
         {info ? (
           info.update_available ? (
-            <span className="text-fg">
-              Alizy <b>v{info.latest}</b> is available (you have v{info.current}).
-            </span>
+            <span className="text-fg">{t("Alizy v{latest} is available (you have v{current}).", { latest: info.latest, current: info.current })}</span>
           ) : (
-            <span className="text-muted">You have the latest version (v{info.current}).</span>
+            <span className="text-muted">{t("You have the latest version (v{current}).", { current: info.current })}</span>
           )
         ) : error ? (
           <span className="selectable text-danger">{error}</span>
         ) : (
-          <span className="text-muted">Asks GitHub Releases for the newest version only when you press the button. Nothing is downloaded.</span>
+          <span className="text-muted">{t("Asks GitHub Releases for the newest version only when you press the button. Nothing is downloaded.")}</span>
         )}
       </div>
       {info?.update_available && (
-        <Button size="sm" variant="primary" onClick={() => void api.openReleasesPage().catch((e) => toast.error("Could not open the browser", e))}>
-          Open release page
+        <Button size="sm" variant="primary" onClick={() => void api.openReleasesPage().catch((e) => toast.error(t("Could not open the browser"), e))}>
+          {t("Open release page")}
         </Button>
       )}
       <Button size="sm" variant="secondary" onClick={() => void run()} disabled={busy}>
         <RefreshCw className={busy ? "animate-spin" : ""} />
-        Check for updates
+        {t("Check for updates")}
       </Button>
     </div>
   );
@@ -319,27 +327,28 @@ function QuitCard() {
         <LogOut className="size-5" />
       </div>
       <div className="min-w-0 flex-1">
-        <div className="text-sm font-medium text-fg">Quit Alizy (UI only)</div>
+        <div className="text-sm font-medium text-fg">{t("Quit Alizy (UI only)")}</div>
         <p className="text-[13px] text-muted">
-          Closes this window and the tray icon. The protection service keeps running — an active VPN connection and the kill switch stay
-          in effect.
+          {t(
+            "Closes this window and the tray icon. The protection service keeps running — an active VPN connection and the kill switch stay in effect.",
+          )}
         </p>
       </div>
       <Button variant="secondary" onClick={() => setOpen(true)}>
-        Quit UI
+        {t("Quit UI")}
       </Button>
       <ConfirmDialog
         open={open}
         onOpenChange={setOpen}
         icon={<LogOut />}
-        title="Quit the Alizy interface?"
-        description="The background service keeps your current connection and kill switch active. Open Alizy again any time to manage it."
-        confirmLabel="Quit UI"
+        title={t("Quit the Alizy interface?")}
+        description={t("The background service keeps your current connection and kill switch active. Open Alizy again any time to manage it.")}
+        confirmLabel={t("Quit UI")}
         onConfirm={async () => {
           try {
             await api.quitUi();
           } catch (e) {
-            toast.error("Could not quit", e);
+            toast.error(t("Could not quit"), e);
             return false;
           }
         }}

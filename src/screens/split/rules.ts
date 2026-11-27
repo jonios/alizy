@@ -1,26 +1,27 @@
 import type { DomainMatch, SplitRule, SplitTarget, Tier } from "../../lib/types";
 import { prefixLen } from "../../lib/validate";
+import { tk } from "../../i18n";
 
 export const DEFAULT_PRIORITY = 100;
 
 export const MATCH_LABEL: Record<DomainMatch, string> = {
-  exact: "Exact",
-  wildcard: "Wildcard",
-  parent: "Domain + subdomains",
+  exact: tk("Exact"),
+  wildcard: tk("Wildcard"),
+  parent: tk("Domain + subdomains"),
 };
 
 export const MATCH_HELP: Record<DomainMatch, string> = {
-  exact: "Only this exact name",
-  wildcard: "Subdomains only (*.example.com), not the name itself",
-  parent: "The name and all its subdomains",
+  exact: tk("Only this exact name"),
+  wildcard: tk("Subdomains only (*.example.com), not the name itself"),
+  parent: tk("The name and all its subdomains"),
 };
 
 export const TIER_LABEL: Record<Tier, string> = {
-  ip: "IP / CIDR",
-  exact_domain: "Exact domain",
-  wildcard_domain: "Wildcard domain",
-  app: "Application",
-  default: "Default",
+  ip: tk("IP / CIDR"),
+  exact_domain: tk("Exact domain"),
+  wildcard_domain: tk("Wildcard domain"),
+  app: tk("Application"),
+  default: tk("Default"),
 };
 
 export function tierOf(t: SplitTarget): Tier {

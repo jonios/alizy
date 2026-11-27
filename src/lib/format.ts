@@ -1,4 +1,5 @@
 import type { ProfileSummary } from "./types";
+import { t } from "../i18n";
 
 // Formatting helpers. Backend timestamps are unix seconds; toSec() also
 // tolerates millisecond values defensively.
@@ -13,8 +14,10 @@ export function nowSec(): number {
 
 const UNITS = ["B", "KB", "MB", "GB", "TB", "PB"];
 
-export function formatBytes(n: number | null | undefined, digits = 1): string {
-  if (n == null || !Number.isFinite(n) || n < 0) return "—";
+/** Left-to-right isolate: keeps "12.3 MB/s" in order inside right-to-left text. */
+const ltr = (s: string) => `\u2066${s}\u2069`;
+
+function bytes(n: number, digits: number): string {
   if (n < 1024) return `${Math.round(n)} B`;
   let v = n;
   let i = 0;
@@ -25,9 +28,14 @@ export function formatBytes(n: number | null | undefined, digits = 1): string {
   return `${v.toFixed(v >= 100 ? 0 : digits)} ${UNITS[i]}`;
 }
 
+export function formatBytes(n: number | null | undefined, digits = 1): string {
+  if (n == null || !Number.isFinite(n) || n < 0) return "—";
+  return ltr(bytes(n, digits));
+}
+
 export function formatRate(bytesPerSec: number | null | undefined): string {
   if (bytesPerSec == null || !Number.isFinite(bytesPerSec)) return "—";
-  return `${formatBytes(Math.max(0, bytesPerSec))}/s`;
+  return ltr(`${bytes(Math.max(0, bytesPerSec), 1)}/s`);
 }
 
 const pad = (n: number) => String(n).padStart(2, "0");
@@ -40,30 +48,30 @@ export function formatClock(totalSec: number): string {
   const m = Math.floor((s % 3600) / 60);
   const sec = s % 60;
   const hms = h > 0 || d > 0 ? `${pad(h)}:${pad(m)}:${pad(sec)}` : `${pad(m)}:${pad(sec)}`;
-  return d > 0 ? `${d}d ${hms}` : hms;
+  return d > 0 ? t("{d}d {hms}", { d, hms }) : hms;
 }
 
 /** Human style: 45s / 12m 3s / 2h 5m / 3d 4h */
 export function formatDuration(totalSec: number): string {
   const s = Math.max(0, Math.floor(totalSec));
-  if (s < 60) return `${s}s`;
+  if (s < 60) return t("{s}s", { s });
   const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ${s % 60}s`;
+  if (m < 60) return t("{m}m {s}s", { m, s: s % 60 });
   const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ${m % 60}m`;
+  if (h < 24) return t("{h}h {m}m", { h, m: m % 60 });
   const d = Math.floor(h / 24);
-  return `${d}d ${h % 24}h`;
+  return t("{d}d {h}h", { d, h: h % 24 });
 }
 
 export function relativeTime(ts: number | null | undefined, now = nowSec()): string {
-  if (!ts) return "never";
+  if (!ts) return t("never");
   const diff = now - toSec(ts);
-  if (diff < -5) return `in ${formatDuration(-diff)}`;
-  if (diff < 5) return "just now";
-  if (diff < 60) return `${diff} s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)} min ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)} h ago`;
-  if (diff < 86400 * 30) return `${Math.floor(diff / 86400)} d ago`;
+  if (diff < -5) return t("in {duration}", { duration: formatDuration(-diff) });
+  if (diff < 5) return t("just now");
+  if (diff < 60) return t("{n} s ago", { n: diff });
+  if (diff < 3600) return t("{n} min ago", { n: Math.floor(diff / 60) });
+  if (diff < 86400) return t("{n} h ago", { n: Math.floor(diff / 3600) });
+  if (diff < 86400 * 30) return t("{n} d ago", { n: Math.floor(diff / 86400) });
   return formatDate(ts);
 }
 
@@ -93,10 +101,6 @@ export function formatTime(ts: number | null | undefined): string {
 export function shortKey(key: string, head = 8, tail = 5): string {
   if (key.length <= head + tail + 1) return key;
   return `${key.slice(0, head)}…${key.slice(-tail)}`;
-}
-
-export function plural(n: number, one: string, many = `${one}s`): string {
-  return `${n} ${n === 1 ? one : many}`;
 }
 
 /** "user@host:port" for SSH profiles (IPv6 hosts bracketed), else the WireGuard endpoint. */

@@ -1,3 +1,5 @@
+<p align="center"><b>English</b> · <a href="README.fa.md">فارسی</a></p>
+
 <p align="center">
   <img src="src-tauri/icons/128x128.png" alt="Alizy logo" width="88" />
 </p>
@@ -6,7 +8,7 @@
 
 <p align="center">
   <b>A Linux VPN client with a kill switch that lives in the kernel.</b><br>
-  WireGuard and SSH tunnels · nftables kill switch · DNS leak protection · split tunnelling · LAN proxy
+  WireGuard and SSH tunnels · tunnel or proxy mode · nftables kill switch · DNS leak protection · split tunnelling · VPN sharing
 </p>
 
 <p align="center">
@@ -40,9 +42,10 @@ The app is a portable **AppImage** that runs as your user. The privileged part i
 | **DNS leak protection** | DNS (53/udp+tcp, 853/tcp) is blocked outside the tunnel. Works with systemd-resolved, resolvconf or a plain `/etc/resolv.conf`. |
 | **Split tunnelling** | VPN by default; send chosen IP ranges or domains directly. A TTL-aware resolver, CNAME support, shared-CDN warnings, and a routing test that reads the kernel's real state. |
 | **SSH tunnels** | No WireGuard server? Tunnel the whole system over SSH. Host keys are pinned (trust on first use), `ssh` runs unprivileged, UDP is blocked so nothing leaks around a TCP-only tunnel. |
-| **LAN proxy** | Share your VPN with a TV, console or phone on your Wi-Fi: HTTP and SOCKS5 proxies whose traffic goes through the tunnel and the kill switch. |
+| **Tunnel or proxy mode** | *Tunnel mode* sends all of the computer's traffic through the VPN. *Proxy mode* leaves the system alone and serves a local SOCKS5/HTTP proxy on `127.0.0.1`: only apps you point at it use the VPN, and it refuses connections while the VPN is down instead of going direct. |
+| **VPN sharing** | Share your VPN with a TV, console or phone on your Wi-Fi: HTTP and SOCKS5 proxies (SOCKS5 with UDP), optionally behind a username and password. |
 | **Profiles** | Favourites, categories, edit, duplicate, export, backup and restore. Private keys live in your desktop keyring, never in the database. |
-| **Desktop app** | Tray icon, notifications, light and dark themes, launch at login, auto-connect, and reconnect after updates. Logs and connection history. |
+| **Desktop app** | English and Persian (right-to-left) interface, tray icon, notifications, light and dark themes, launch at login, auto-connect, and reconnect after updates. Logs and connection history. |
 
 ## Screenshots
 
@@ -167,12 +170,32 @@ through a one-shot, token-protected socket, never through the command line or th
 environment. Only TCP is tunnelled, so UDP is blocked, and DNS goes over TCP through the
 tunnel. Needs `openssh` and `badvpn`.
 
-## LAN proxy
+## Tunnel mode and proxy mode
+
+*Network Settings → Connection mode* chooses how the VPN is used:
+
+| | Tunnel mode (default) | Proxy mode |
+|---|---|---|
+| What uses the VPN | everything on the computer, including apps without proxy support | only apps set to use `127.0.0.1:10808` (SOCKS5) or `127.0.0.1:10809` (HTTP) |
+| System routes and DNS | changed while connected | untouched |
+| Kill switch | available | not used (your setting returns with tunnel mode) |
+| VPN down | kill switch blocks direct traffic | the proxy refuses connections; other apps keep their normal connection |
+
+Switching modes reconnects the VPN and cleans up the previous mode's routes, rules and
+DNS first. In proxy mode, WireGuard traffic from the proxy is marked so only the tunnel's
+routing table carries it, and the firewall rejects marked packets on any other
+interface. With SSH, the proxy goes through `ssh -D` and names are resolved on the
+server.
+
+## Sharing the VPN
 
 *Network Settings → Share VPN with other devices* starts an HTTP proxy (port 8080) and a
 SOCKS5 proxy (1080) on your machine. Point a TV's or phone's proxy setting at the
-address the app shows, and that device browses through your VPN. **There is no
-password:** anyone on your network can use it while it's on. Details: [LAN_PROXY.md](LAN_PROXY.md).
+address the app shows, and that device browses through your VPN. SOCKS5 also carries
+UDP (UDP ASSOCIATE) when the tunnel can, so games and calls work; SSH tunnels are TCP
+only. By default **there is no password**; turn on *Require a username and password*
+so devices must log in. The service stores only a salted hash; note that HTTP proxy
+logins cross your LAN unencrypted. Details: [LAN_PROXY.md](LAN_PROXY.md).
 
 ## Updating
 
@@ -257,7 +280,8 @@ namespaces: kill switch, leaks, split tunnelling, recovery), `tests/installer/ru
 yet).
 
 Linux only. Windows and macOS are designed but not implemented
-([docs/PLATFORMS.md](docs/PLATFORMS.md)).
+([docs/PLATFORMS.md](docs/PLATFORMS.md)). How protocols plug in, and the plan for
+sing-box and subscriptions: [docs/MULTI_PROTOCOL.md](docs/MULTI_PROTOCOL.md).
 
 ## License
 

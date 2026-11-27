@@ -28,6 +28,7 @@ import { PublicIpCard } from "./PublicIpCard";
 import { QuickSwitcher, quickOrder } from "./QuickSwitcher";
 import { TrafficCard } from "./TrafficCard";
 import { TunnelCard } from "./TunnelCard";
+import { t } from "../../i18n";
 
 export function Dashboard() {
   const { status, daemonError, received, pending, connect, disconnect } = useStatus();
@@ -56,22 +57,24 @@ export function Dashboard() {
   };
 
   const tone = STATE_TONE[state];
-  const buttonLabel = engaged ? (state === "connected" ? "Disconnect" : "Cancel") : state === "disconnecting" ? "Stopping" : "Connect";
+  const buttonLabel = engaged ? (state === "connected" ? t("Disconnect") : t("Cancel")) : state === "disconnecting" ? t("Stopping") : t("Connect");
 
   return (
     <>
-      <ScreenHeader title="Dashboard" description="Connection overview and live tunnel health" />
+      <ScreenHeader title={t("Dashboard")} description={t("Connection overview and live tunnel health")} />
       <ScreenBody className="flex flex-col gap-5">
         {received && daemonError && <DaemonBanner error={daemonError} />}
         {appVersion && status?.daemon_version && status.daemon_version !== appVersion && (
-          <Alert tone="warning" title="App and service versions differ">
-            This app is v{appVersion}, the background service is v{status.daemon_version}. Run the matching{" "}
-            <code className="font-mono">alizy-installer</code> from the release page to update both together.
+          <Alert tone="warning" title={t("App and service versions differ")}>
+            {t(
+              "This app is v{app}, the background service is v{service}. Run the matching alizy-installer from the release page to update both together.",
+              { app: appVersion, service: status.daemon_version },
+            )}
           </Alert>
         )}
 
         {status?.last_error && (
-          <Alert tone="danger" title="Last connection error">
+          <Alert tone="danger" title={t("Last connection error")}>
             <span className="selectable">{status.last_error}</span>
           </Alert>
         )}
@@ -109,10 +112,14 @@ export function Dashboard() {
                 />
                 <div className="relative mt-5 text-center">
                   <div className={cn("text-lg font-semibold tracking-tight", unavailable ? "text-danger" : TONE_TEXT[tone])} aria-live="polite">
-                    {unavailable ? "Service unavailable" : STATE_LABEL[state]}
+                    {unavailable ? t("Service unavailable") : t(STATE_LABEL[state])}
                   </div>
                   <p className="mt-1 max-w-[300px] text-[13px] leading-relaxed text-muted">
-                    {unavailable ? "Start the Alizy service to connect." : STATE_DESCRIPTION[state]}
+                    {unavailable
+                      ? t("Start the Alizy service to connect.")
+                      : state === "connected" && status?.policy.mode === "proxy"
+                        ? t("Apps using Alizy’s local proxy go through the VPN; other traffic connects directly.")
+                        : t(STATE_DESCRIPTION[state])}
                   </p>
                 </div>
                 <Duration since={active ? (status?.connected_since ?? null) : null} />
@@ -153,7 +160,7 @@ function Duration({ since }: { since: number | null }) {
   const now = useNow(1000);
   if (!since) return <div className="mt-3 h-7" aria-hidden />;
   return (
-    <div className="mt-3 rounded-full border border-border bg-surface-2/70 px-3 py-1 font-mono text-[15px] font-medium text-fg tabular" aria-label="Connection duration">
+    <div className="mt-3 rounded-full border border-border bg-surface-2/70 px-3 py-1 font-mono text-[15px] font-medium text-fg tabular" dir="ltr" aria-label={t("Connection duration")}>
       {formatClock(now - since)}
     </div>
   );
@@ -174,7 +181,7 @@ function ProfilePicker({
     return (
       <div className="flex items-center justify-center gap-2 rounded-xl border border-dashed border-border px-4 py-3 text-[13px] text-muted">
         <CircleAlert className="size-4 text-faint" />
-        Import a configuration to connect
+        {t("Import a configuration to connect")}
       </div>
     );
   }
@@ -183,24 +190,24 @@ function ProfilePicker({
       <DropdownMenuTrigger asChild disabled={locked}>
         <button
           type="button"
-          className="flex w-full items-center gap-3 rounded-xl border border-border bg-surface-2/60 px-3.5 py-2.5 text-left transition-colors hover:border-border-strong disabled:cursor-default disabled:hover:border-border focus-visible:outline-2 focus-visible:outline-ring"
-          aria-label="Choose profile"
+          className="flex w-full items-center gap-3 rounded-xl border border-border bg-surface-2/60 px-3.5 py-2.5 text-start transition-colors hover:border-border-strong disabled:cursor-default disabled:hover:border-border focus-visible:outline-2 focus-visible:outline-ring"
+          aria-label={t("Choose profile")}
         >
           <FileCode2 className="size-4 shrink-0 text-faint" />
           <div className="min-w-0 flex-1">
-            <div className="text-[11px] text-faint">{locked ? "Active profile" : "Profile"}</div>
-            <div className="truncate text-sm font-medium text-fg">{targetName ?? "Choose a profile"}</div>
+            <div className="text-[11px] text-faint">{locked ? t("Active profile") : t("Profile")}</div>
+            <div className="truncate text-sm font-medium text-fg">{targetName ?? t("Choose a profile")}</div>
           </div>
           {!locked && <ChevronDown className="size-4 text-faint" />}
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="center" className="max-h-80 w-[var(--radix-dropdown-menu-trigger-width)] overflow-y-auto">
-        <DropdownMenuLabel>Connect with</DropdownMenuLabel>
+        <DropdownMenuLabel>{t("Connect with")}</DropdownMenuLabel>
         {ordered.map((p) => (
           <DropdownMenuItem key={p.id} onSelect={() => onPick(p.id)}>
             {p.favorite ? <Star className="fill-warning !text-warning" /> : <FileCode2 />}
             <span className="flex-1 truncate">{p.name}</span>
-            <span className="text-[11px] text-faint">{p.endpoint?.replace(/:\d+$/, "")}</span>
+            <span dir="ltr" className="text-[11px] text-faint">{p.endpoint?.replace(/:\d+$/, "")}</span>
           </DropdownMenuItem>
         ))}
       </DropdownMenuContent>

@@ -8,6 +8,7 @@ import { DomainStatusLine } from "./DomainStatusLine";
 import { RuleListTab } from "./RuleListTab";
 import { MATCH_HELP, MATCH_LABEL, parseDomainInput } from "./rules";
 import { useSplit } from "./store";
+import { t } from "../../i18n";
 
 export function DomainsTab() {
   const data = useSplit((s) => s.data);
@@ -24,10 +25,10 @@ export function DomainsTab() {
       kind="domain"
       addBar={
         <AddRuleBar
-          placeholder="bank.example.com or *.bank.example.com"
+          placeholder={t("{domain} or {wildcard}", { domain: "bank.example.com", wildcard: "*.bank.example.com" })}
           value={value}
           onValueChange={onValue}
-          hint={MATCH_HELP[mode]}
+          hint={t(MATCH_HELP[mode])}
           build={(raw) => {
             const c = checkDomain(raw);
             if (!c.ok) return { error: c.error };
@@ -38,20 +39,20 @@ export function DomainsTab() {
             <Select
               value={mode}
               onValueChange={(v) => setMode(v as DomainMatch)}
-              aria-label="Match mode"
+              aria-label={t("Match mode")}
               className="w-48"
               options={(["exact", "wildcard", "parent"] as DomainMatch[]).map((m) => ({
                 value: m,
-                label: m === "wildcard" ? "Wildcard (subdomains only)" : m === "parent" ? "Parent (domain + subdomains)" : MATCH_LABEL[m],
-                description: MATCH_HELP[m],
+                label: m === "wildcard" ? t("Wildcard (subdomains only)") : m === "parent" ? t("Parent (domain + subdomains)") : t(MATCH_LABEL[m]),
+                description: t(MATCH_HELP[m]),
               }))}
             />
           }
         />
       }
       emptyIcon={<Globe />}
-      emptyTitle="No domain rules"
-      emptyDescription="Add a domain to send it directly through your regular connection (or force it through the VPN). Alizy resolves the name and keeps the routes in sync with DNS."
+      emptyTitle={t("No domain rules")}
+      emptyDescription={t("Add a domain to send it directly through your regular connection (or force it through the VPN). Alizy resolves the name and keeps the routes in sync with DNS.")}
       details={(r) => (
         <DomainStatusLine st={data?.domains.find((d) => d.rule_id === r.id)} enabled={r.enabled} splitOn={!!data?.config.enabled} />
       )}

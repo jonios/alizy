@@ -8,6 +8,7 @@ import { checkDomain, checkNet } from "../../lib/validate";
 import { MATCH_HELP, MATCH_LABEL, parseDomainInput, targetKey, targetText } from "./rules";
 import { ActionToggle } from "./RuleRow";
 import { useRules, useSplit } from "./store";
+import { t } from "../../i18n";
 
 export function RuleEditDialog({ rule, onOpenChange }: { rule: SplitRule | null; onOpenChange: (o: boolean) => void }) {
   const mutate = useSplit((s) => s.mutate);
@@ -60,7 +61,7 @@ export function RuleEditDialog({ rule, onOpenChange }: { rule: SplitRule | null;
             : r,
         ),
       }),
-      "Rule updated",
+      t("Rule updated"),
     );
     setBusy(false);
     if (ok) onOpenChange(false);
@@ -77,49 +78,49 @@ export function RuleEditDialog({ rule, onOpenChange }: { rule: SplitRule | null;
           className="flex min-h-0 flex-col"
         >
           <DialogHeader>
-            <DialogTitle>Edit {isDomain ? "domain" : "IP"} rule</DialogTitle>
+            <DialogTitle>{isDomain ? t("Edit domain rule") : t("Edit IP rule")}</DialogTitle>
           </DialogHeader>
           <DialogBody className="flex flex-col gap-4">
             <Field
-              label={isDomain ? "Domain" : "IP address or CIDR"}
+              label={isDomain ? t("Domain") : t("IP address or CIDR")}
               htmlFor="rule-target"
-              error={built.error ?? (dup ? "Another rule already targets this." : null)}
+              error={built.error ?? (dup ? t("Another rule already targets this.") : null)}
             >
-              <Input id="rule-target" value={target} onChange={(e) => setTarget(e.target.value)} className="font-mono" invalid={!!built.error || !!dup} autoFocus />
+              <Input id="rule-target" value={target} onChange={(e) => setTarget(e.target.value)} className="font-mono" dir="ltr" invalid={!!built.error || !!dup} autoFocus />
             </Field>
             {isDomain && (
-              <Field label="Match" hint={MATCH_HELP[mode]}>
+              <Field label={t("Match")} hint={t(MATCH_HELP[mode])}>
                 <Select
                   value={mode}
                   onValueChange={(v) => setMode(v as DomainMatch)}
-                  aria-label="Match mode"
-                  options={(["exact", "wildcard", "parent"] as DomainMatch[]).map((m) => ({ value: m, label: MATCH_LABEL[m], description: MATCH_HELP[m] }))}
+                  aria-label={t("Match mode")}
+                  options={(["exact", "wildcard", "parent"] as DomainMatch[]).map((m) => ({ value: m, label: t(MATCH_LABEL[m]), description: t(MATCH_HELP[m]) }))}
                 />
               </Field>
             )}
             <div className="grid grid-cols-2 gap-4">
-              <Field label="Route via">
+              <Field label={t("Route via")}>
                 <div>
                   <ActionToggle value={action} onChange={setAction} size="md" />
                 </div>
               </Field>
-              <Field label="Priority" htmlFor="rule-prio" error={prioOk ? null : "0–65535"} hint="Lower wins within a tier">
+              <Field label={t("Priority")} htmlFor="rule-prio" error={prioOk ? null : "0–65535"} hint={t("Lower wins within a tier")}>
                 <Input id="rule-prio" type="number" min={0} max={65535} value={priority} onChange={(e) => setPriority(e.target.value)} invalid={!prioOk} />
               </Field>
             </div>
-            <Field label="Category" htmlFor="rule-cat" hint="Optional, e.g. Banking or Streaming">
+            <Field label={t("Category")} htmlFor="rule-cat" hint={t("Optional, e.g. Banking or Streaming")}>
               <Input id="rule-cat" value={category} onChange={(e) => setCategory(e.target.value)} maxLength={40} list="split-categories" />
             </Field>
-            <Field label="Note" htmlFor="rule-note">
-              <Input id="rule-note" value={note} onChange={(e) => setNote(e.target.value)} maxLength={200} placeholder="Optional" />
+            <Field label={t("Note")} htmlFor="rule-note">
+              <Input id="rule-note" value={note} onChange={(e) => setNote(e.target.value)} maxLength={200} placeholder={t("Optional")} />
             </Field>
           </DialogBody>
           <DialogFooter>
             <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>
-              Cancel
+              {t("Cancel")}
             </Button>
             <Button type="submit" variant="primary" loading={busy} disabled={!built.target || !!dup || !prioOk}>
-              Save rule
+              {t("Save rule")}
             </Button>
           </DialogFooter>
         </form>

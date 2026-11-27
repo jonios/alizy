@@ -1,5 +1,6 @@
 import { useId } from "react";
 import type { RatePoint } from "../../store/status";
+import { t } from "../../i18n";
 
 /** Two-series area sparkline (download + upload rate), no chart library. */
 export function Sparkline({ points, height = 64, capacity = 60 }: { points: RatePoint[]; height?: number; capacity?: number }) {
@@ -21,7 +22,7 @@ export function Sparkline({ points, height = 64, capacity = 60 }: { points: Rate
   const tx = path("tx");
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" className="h-full w-full" role="img" aria-label="Throughput over the last minute">
+    <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" className="h-full w-full" role="img" aria-label={t("Throughput over the last minute")}>
       <defs>
         <linearGradient id={`rx-${id}`} x1="0" y1="0" x2="0" y2="1">
           <stop offset="0" stopColor="var(--primary)" stopOpacity="0.35" />

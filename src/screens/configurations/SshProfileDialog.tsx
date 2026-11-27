@@ -9,14 +9,15 @@ import { validateSsh, type SshFields } from "../../lib/validate";
 import { errMsg } from "../../lib/utils";
 import { useProfiles } from "../../store/profiles";
 import { toast } from "../../store/toast";
+import { t, tk } from "../../i18n";
 
-export const SSH_UDP_NOTE = "Only TCP traffic is carried over SSH. UDP (e.g. QUIC, voice and video calls, games) is blocked while connected.";
+export const SSH_UDP_NOTE = tk("Only TCP traffic is carried over SSH. UDP (e.g. QUIC, voice and video calls, games) is blocked while connected.");
 
 export function UdpNote({ className }: { className?: string }) {
   return (
     <div className={`flex items-start gap-2 rounded-xl border border-warning/30 bg-warning/[0.06] px-3.5 py-2.5 text-[13px] ${className ?? ""}`}>
       <Info className="mt-0.5 size-4 shrink-0 text-warning" />
-      <span className="text-fg">{SSH_UDP_NOTE}</span>
+      <span className="text-fg">{t(SSH_UDP_NOTE)}</span>
     </div>
   );
 }
@@ -96,7 +97,7 @@ function SshDialogBody({
         ? await api.updateSsh(profile.id, f.name.trim(), host, port, f.username, f.password || null)
         : await api.createSsh(f.name.trim(), host, port, f.username, f.password);
       setF((p) => ({ ...p, password: "" }));
-      toast.success(profile ? "Connection updated" : "Connection added", saved.name);
+      toast.success(profile ? t("Connection updated") : t("Connection added"), saved.name);
       void useProfiles.getState().load();
       onOpenChange(false);
       onSaved?.(saved);
@@ -128,14 +129,14 @@ function SshDialogBody({
           noValidate
         >
           <DialogHeader>
-            <DialogTitle>{editing ? "Edit SSH connection" : "New SSH connection"}</DialogTitle>
+            <DialogTitle>{editing ? t("Edit SSH connection") : t("New SSH connection")}</DialogTitle>
           </DialogHeader>
           <DialogBody className="flex flex-col gap-4">
-            <Field label="Connection Name" htmlFor="ssh-name" error={show("name")}>
+            <Field label={t("Connection Name")} htmlFor="ssh-name" error={show("name")}>
               <Input id="ssh-name" ref={nameRef} value={f.name} onChange={set("name")} onBlur={blur("name")} maxLength={64} invalid={!!show("name")} autoComplete="off" />
             </Field>
             <div className="grid grid-cols-[minmax(0,1fr)_7rem] gap-3">
-              <Field label="Server IP Address" htmlFor="ssh-host" error={show("host")}>
+              <Field label={t("Server IP Address")} htmlFor="ssh-host" error={show("host")}>
                 <Input
                   id="ssh-host"
                   value={f.host}
@@ -144,10 +145,11 @@ function SshDialogBody({
                   invalid={!!show("host")}
                   spellCheck={false}
                   autoComplete="off"
+                  dir="ltr"
                   className="font-mono"
                 />
               </Field>
-              <Field label="Port" htmlFor="ssh-port" error={show("port")}>
+              <Field label={t("Port")} htmlFor="ssh-port" error={show("port")}>
                 <Input
                   id="ssh-port"
                   value={f.port}
@@ -156,11 +158,12 @@ function SshDialogBody({
                   invalid={!!show("port")}
                   inputMode="numeric"
                   autoComplete="off"
+                  dir="ltr"
                   className="font-mono"
                 />
               </Field>
             </div>
-            <Field label="Username" htmlFor="ssh-user" error={show("username")}>
+            <Field label={t("Username")} htmlFor="ssh-user" error={show("username")}>
               <Input
                 id="ssh-user"
                 value={f.username}
@@ -170,9 +173,10 @@ function SshDialogBody({
                 spellCheck={false}
                 autoComplete="off"
                 autoCapitalize="none"
+                dir="ltr"
               />
             </Field>
-            <Field label="Password" htmlFor="ssh-password" error={show("password")}>
+            <Field label={t("Password")} htmlFor="ssh-password" error={show("password")}>
               <Input
                 id="ssh-password"
                 ref={passwordRef}
@@ -181,7 +185,7 @@ function SshDialogBody({
                 onChange={set("password")}
                 onBlur={blur("password")}
                 invalid={!!show("password")}
-                placeholder={editing ? "Leave blank to keep the current password" : undefined}
+                placeholder={editing ? t("Leave blank to keep the current password") : undefined}
                 autoComplete="new-password"
               />
             </Field>
@@ -194,10 +198,10 @@ function SshDialogBody({
           </DialogBody>
           <DialogFooter>
             <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>
-              Cancel
+              {t("Cancel")}
             </Button>
             <Button variant="primary" type="submit" loading={busy}>
-              {editing ? "Save" : "Add"}
+              {editing ? t("Save") : t("Add")}
             </Button>
           </DialogFooter>
         </form>

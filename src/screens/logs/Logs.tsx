@@ -20,23 +20,34 @@ import { useDebounced, useInterval, useNow } from "../../lib/hooks";
 import { cn, errMsg } from "../../lib/utils";
 import { toast } from "../../store/toast";
 import { HistoryTable } from "./HistoryTable";
+import { t, tk } from "../../i18n";
 
 const ALL = "__all";
 const LEVEL_TONE: Record<LogLevel, BadgeTone> = { info: "neutral", warn: "warning", error: "danger" };
 const CATEGORIES: LogCategory[] = ["connection", "firewall", "dns", "network", "service", "app"];
+const CATEGORY_LABEL: Record<LogCategory, string> = {
+  connection: tk("Connection"),
+  firewall: tk("Firewall"),
+  dns: "DNS",
+  network: tk("Network"),
+  service: tk("Service"),
+  app: tk("App"),
+};
+const LEVEL_LABEL: Record<LogLevel, string> = { info: tk("Info"), warn: tk("Warn"), error: tk("Error") };
+const SOURCE_LABEL: Record<LogEntry["source"], string> = { app: tk("app"), daemon: tk("daemon") };
 
 export function Logs() {
   const [tab, setTab] = useState("logs");
   return (
     <>
-      <ScreenHeader title="Logs" description="Events from the app and the background service, plus your connection history.">
+      <ScreenHeader title={t("Logs")} description={t("Events from the app and the background service, plus your connection history.")}>
         <Tabs value={tab} onValueChange={setTab}>
           <TabsList>
             <TabsTrigger value="logs">
-              <ScrollText /> Event log
+              <ScrollText /> {t("Event log")}
             </TabsTrigger>
             <TabsTrigger value="history">
-              <History /> Connection history
+              <History /> {t("Connection history")}
             </TabsTrigger>
           </TabsList>
         </Tabs>
@@ -89,18 +100,18 @@ function LogView() {
   const doExport = async () => {
     let path: string | null;
     try {
-      path = await save({ title: "Export logs", defaultPath: `alizy-logs-${new Date().toISOString().slice(0, 10)}.log`, filters: [{ name: "Log", extensions: ["log", "txt"] }] });
+      path = await save({ title: t("Export logs"), defaultPath: `alizy-logs-${new Date().toISOString().slice(0, 10)}.log`, filters: [{ name: t("Log"), extensions: ["log", "txt"] }] });
     } catch (e) {
-      toast.error("Could not open the save dialog", e);
+      toast.error(t("Could not open the save dialog"), e);
       return;
     }
     if (!path) return;
     setExporting(true);
     try {
       const n = await api.logsExport(path);
-      toast.success(`Exported ${n} log entr${n === 1 ? "y" : "ies"}`, path);
+      toast.success(n === 1 ? t("Exported {count} log entry", { count: n }) : t("Exported {count} log entries", { count: n }), path);
     } catch (e) {
-      toast.error("Export failed", e);
+      toast.error(t("Export failed"), e);
     } finally {
       setExporting(false);
     }
@@ -115,81 +126,85 @@ function LogView() {
           leading={<Search />}
           trailing={
             search ? (
-              <Button variant="ghost" size="icon-sm" onClick={() => setSearch("")} aria-label="Clear search">
+              <Button variant="ghost" size="icon-sm" onClick={() => setSearch("")} aria-label={t("Clear search")}>
                 <X />
               </Button>
             ) : undefined
           }
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search messages…"
+          placeholder={t("Search messages…")}
           className="w-64"
-          aria-label="Search logs"
+          aria-label={t("Search logs")}
         />
         <Select
           value={level}
           onValueChange={setLevel}
-          aria-label="Filter by level"
+          aria-label={t("Filter by level")}
           className="w-32"
           options={[
-            { value: ALL, label: "All levels" },
-            { value: "info", label: "Info" },
-            { value: "warn", label: "Warning" },
-            { value: "error", label: "Error" },
+            { value: ALL, label: t("All levels") },
+            { value: "info", label: t("Info") },
+            { value: "warn", label: t("Warning") },
+            { value: "error", label: t("Error") },
           ]}
         />
         <Select
           value={category}
           onValueChange={setCategory}
-          aria-label="Filter by category"
+          aria-label={t("Filter by category")}
           className="w-40"
-          options={[{ value: ALL, label: "All categories" }, ...CATEGORIES.map((c) => ({ value: c, label: c[0].toUpperCase() + c.slice(1) }))]}
+          options={[{ value: ALL, label: t("All categories") }, ...CATEGORIES.map((c) => ({ value: c, label: t(CATEGORY_LABEL[c]) }))]}
         />
-        <label className="ml-2 flex items-center gap-2 text-[13px] text-muted">
-          <Switch size="sm" checked={auto} onCheckedChange={setAuto} aria-label="Auto-refresh every 3 seconds" />
-          Auto-refresh
+        <label className="ms-2 flex items-center gap-2 text-[13px] text-muted">
+          <Switch size="sm" checked={auto} onCheckedChange={setAuto} aria-label={t("Auto-refresh every 3 seconds")} />
+          {t("Auto-refresh")}
         </label>
-        <div className="ml-auto flex items-center gap-1.5">
-          <Tooltip content="Refresh now">
-            <Button variant="ghost" size="icon" onClick={() => void load()} aria-label="Refresh logs" disabled={loading}>
+        <div className="ms-auto flex items-center gap-1.5">
+          <Tooltip content={t("Refresh now")}>
+            <Button variant="ghost" size="icon" onClick={() => void load()} aria-label={t("Refresh logs")} disabled={loading}>
               <RefreshCw className={loading ? "animate-spin" : ""} />
             </Button>
           </Tooltip>
           <Button variant="secondary" size="sm" onClick={doExport} loading={exporting}>
-            {!exporting && <Download />} Export
+            {!exporting && <Download />} {t("Export")}
           </Button>
           <Button variant="danger-ghost" size="sm" onClick={() => setClearOpen(true)}>
-            <Trash2 /> Clear
+            <Trash2 /> {t("Clear")}
           </Button>
         </div>
       </div>
 
       {error && entries && (
-        <Alert tone="danger" title="Couldn’t refresh logs">
+        <Alert tone="danger" title={t("Couldn’t refresh logs")}>
           <span className="selectable">{error}</span>
         </Alert>
       )}
 
       {entries === null ? (
         error ? (
-          <EmptyState tone="danger" icon={<ScrollText />} title="Logs unavailable" description={<span className="selectable">{error}</span>} />
+          <EmptyState tone="danger" icon={<ScrollText />} title={t("Logs unavailable")} description={<span className="selectable">{error}</span>} />
         ) : (
           <SkeletonRows rows={8} />
         )
       ) : entries.length === 0 ? (
         <EmptyState
           icon={filtered ? <SearchX /> : <ScrollText />}
-          title={filtered ? "No matching log entries" : "No log entries yet"}
-          description={filtered ? "Try a different filter or search term." : "Events appear here as you connect, change settings, or when the service reports something."}
+          title={filtered ? t("No matching log entries") : t("No log entries yet")}
+          description={
+            filtered
+              ? t("Try a different filter or search term.")
+              : t("Events appear here as you connect, change settings, or when the service reports something.")
+          }
         />
       ) : (
         <div className="overflow-hidden rounded-2xl border border-border bg-surface shadow-card">
           <div className="grid grid-cols-[150px_72px_100px_64px_1fr] gap-3 border-b border-border bg-surface-2/60 px-4 py-2 text-[11px] font-medium tracking-wide text-faint uppercase">
-            <span>Time</span>
-            <span>Level</span>
-            <span>Category</span>
-            <span>Source</span>
-            <span>Message</span>
+            <span>{t("Time")}</span>
+            <span>{t("Level")}</span>
+            <span>{t("Category")}</span>
+            <span>{t("Source")}</span>
+            <span>{t("Message")}</span>
           </div>
           <div role="log" aria-live="off" className="divide-y divide-border">
             {entries.map((e) => (
@@ -208,18 +223,18 @@ function LogView() {
                 </Tooltip>
                 <span>
                   <Badge tone={LEVEL_TONE[e.level]} className="uppercase">
-                    {e.level}
+                    {LEVEL_LABEL[e.level] ? t(LEVEL_LABEL[e.level]) : e.level}
                   </Badge>
                 </span>
-                <span className="text-xs text-muted capitalize">{e.category}</span>
+                <span className="text-xs text-muted capitalize">{CATEGORY_LABEL[e.category] ? t(CATEGORY_LABEL[e.category]) : e.category}</span>
                 <span>
-                  <Badge tone={e.source === "daemon" ? "primary" : "outline"}>{e.source}</Badge>
+                  <Badge tone={e.source === "daemon" ? "primary" : "outline"}>{SOURCE_LABEL[e.source] ? t(SOURCE_LABEL[e.source]) : e.source}</Badge>
                 </span>
                 <span className="selectable font-mono text-[12px] leading-relaxed break-words whitespace-pre-wrap text-fg">{e.message}</span>
               </div>
             ))}
           </div>
-          {entries.length >= 500 && <div className="border-t border-border px-4 py-2 text-center text-xs text-faint">Showing the latest 500 entries. Export for the full log.</div>}
+          {entries.length >= 500 && <div className="border-t border-border px-4 py-2 text-center text-xs text-faint">{t("Showing the latest 500 entries. Export for the full log.")}</div>}
         </div>
       )}
 
@@ -228,16 +243,18 @@ function LogView() {
         onOpenChange={setClearOpen}
         destructive
         icon={<Trash2 />}
-        title="Clear all logs?"
-        description="This permanently removes all stored log entries. Connection history is not affected. Export them first if you may need them for troubleshooting."
-        confirmLabel="Clear logs"
+        title={t("Clear all logs?")}
+        description={t(
+          "This permanently removes all stored log entries. Connection history is not affected. Export them first if you may need them for troubleshooting.",
+        )}
+        confirmLabel={t("Clear logs")}
         onConfirm={async () => {
           try {
             await api.logsClear();
-            toast.success("Logs cleared");
+            toast.success(t("Logs cleared"));
             await load();
           } catch (e) {
-            toast.error("Could not clear logs", e);
+            toast.error(t("Could not clear logs"), e);
             return false;
           }
         }}

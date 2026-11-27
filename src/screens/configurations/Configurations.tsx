@@ -33,7 +33,7 @@ import {
 } from "../../components/ui/dropdown-menu";
 import { useNow } from "../../lib/hooks";
 import { cn } from "../../lib/utils";
-import { plural } from "../../lib/format";
+import { t } from "../../i18n";
 import { useProfiles } from "../../store/profiles";
 import { useImportReport } from "../../store/importReport";
 import { usePing } from "../../store/ping";
@@ -100,57 +100,61 @@ export function Configurations() {
   return (
     <>
       <ScreenHeader
-        title="Configurations"
-        description={loaded ? `${plural(profiles.length, "profile")} · drag .conf files anywhere onto the window to import` : "WireGuard profiles"}
+        title={t("Configurations")}
+        description={
+          loaded
+            ? `${profiles.length === 1 ? t("{count} profile", { count: profiles.length }) : t("{count} profiles", { count: profiles.length })} · ${t("drag .conf files anywhere onto the window to import")}`
+            : t("WireGuard profiles")
+        }
         actions={
           <>
-            <Tooltip content="Re-measure the ping of every profile">
+            <Tooltip content={t("Re-measure the ping of every profile")}>
               <Button
                 variant="secondary"
                 size="sm"
                 onClick={() => void pingAll()}
                 loading={pinging}
                 disabled={profiles.length === 0}
-                aria-label="Re-measure pings"
+                aria-label={t("Re-measure pings")}
               >
-                {!pinging && <Activity />} Ping
+                {!pinging && <Activity />} {t("Ping")}
               </Button>
             </Tooltip>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="sm" aria-label="Backup and restore">
-                  <DatabaseBackup /> Backup <ChevronDown className="!size-3.5 opacity-60" />
+                <Button variant="ghost" size="sm" aria-label={t("Backup and restore")}>
+                  <DatabaseBackup /> {t("Backup")} <ChevronDown className="!size-3.5 opacity-60" />
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent>
                 <DropdownMenuItem onSelect={() => setBackupOpen(true)}>
-                  <DatabaseBackup /> Create backup…
+                  <DatabaseBackup /> {t("Create backup…")}
                 </DropdownMenuItem>
                 <DropdownMenuItem onSelect={() => void restoreBackup()}>
-                  <ArchiveRestore /> Restore from backup…
+                  <ArchiveRestore /> {t("Restore from backup…")}
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button variant="primary" size="sm" loading={importing}>
-                  {!importing && <Upload />} Import <ChevronDown className="!size-3.5 opacity-80" />
+                  {!importing && <Upload />} {t("Import")} <ChevronDown className="!size-3.5 opacity-80" />
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent className="w-56">
                 <DropdownMenuItem onSelect={() => void importFiles()}>
-                  <FileUp /> Import files…
+                  <FileUp /> {t("Import files…")}
                 </DropdownMenuItem>
                 <DropdownMenuItem onSelect={() => void importFolder()}>
-                  <FolderOpen /> Import folder…
+                  <FolderOpen /> {t("Import folder…")}
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onSelect={() => setPasteOpen(true)}>
-                  <ClipboardPaste /> Paste configuration…
+                  <ClipboardPaste /> {t("Paste configuration…")}
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onSelect={() => setSshOpen(true)}>
-                  <Terminal /> SSH connection…
+                  <Terminal /> {t("SSH connection…")}
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -162,26 +166,26 @@ export function Configurations() {
             leading={<Search />}
             trailing={
               query ? (
-                <Button variant="ghost" size="icon-sm" onClick={() => setQuery("")} aria-label="Clear search">
+                <Button variant="ghost" size="icon-sm" onClick={() => setQuery("")} aria-label={t("Clear search")}>
                   <X />
                 </Button>
               ) : undefined
             }
-            placeholder="Search name, endpoint, address…"
+            placeholder={t("Search name, endpoint, address…")}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             className="w-72"
-            aria-label="Search profiles"
+            aria-label={t("Search profiles")}
           />
           <Select
             size="md"
             value={category}
             onValueChange={setCategory}
-            aria-label="Filter by category"
+            aria-label={t("Filter by category")}
             className="w-44"
             options={[
-              { value: ALL, label: "All categories" },
-              { value: NONE, label: "Uncategorized" },
+              { value: ALL, label: t("All categories") },
+              { value: NONE, label: t("Uncategorized") },
               ...categories.map((c) => ({ value: c, label: c })),
             ]}
           />
@@ -192,23 +196,23 @@ export function Configurations() {
             aria-pressed={favOnly}
             className={cn(favOnly && "shadow-none")}
           >
-            <Star className={cn(favOnly && "fill-current")} /> Favorites
+            <Star className={cn(favOnly && "fill-current")} /> {t("Favorites")}
           </Button>
-          <div className="ml-auto flex items-center gap-2">
-            <span className="text-xs text-faint">Sort</span>
+          <div className="ms-auto flex items-center gap-2">
+            <span className="text-xs text-faint">{t("Sort")}</span>
             <Select
               value={sort}
               onValueChange={(v) => setSort(v as Sort)}
-              aria-label="Sort profiles"
+              aria-label={t("Sort profiles")}
               className="w-36"
               options={[
-                { value: "last_used", label: "Last used" },
-                { value: "name", label: "Name" },
-                { value: "created", label: "Date added" },
+                { value: "last_used", label: t("Last used") },
+                { value: "name", label: t("Name") },
+                { value: "created", label: t("Date added") },
               ]}
             />
-            <Tooltip content="Reload">
-              <Button variant="ghost" size="icon" onClick={() => void load()} aria-label="Reload profiles" disabled={loading}>
+            <Tooltip content={t("Reload")}>
+              <Button variant="ghost" size="icon" onClick={() => void load()} aria-label={t("Reload profiles")} disabled={loading}>
                 <RefreshCw className={loading ? "animate-spin" : ""} />
               </Button>
             </Tooltip>
@@ -218,7 +222,7 @@ export function Configurations() {
 
       <ScreenBody>
         {error && loaded && profiles.length > 0 && (
-          <Alert tone="danger" title="Couldn’t refresh the profile list" className="mb-4">
+          <Alert tone="danger" title={t("Couldn’t refresh the profile list")} className="mb-4">
             {error}
           </Alert>
         )}
@@ -228,11 +232,11 @@ export function Configurations() {
           <EmptyState
             tone="danger"
             icon={<FileCode2 />}
-            title="Couldn’t load your configurations"
+            title={t("Couldn’t load your configurations")}
             description={<span className="selectable">{error}</span>}
             action={
               <Button variant="secondary" size="sm" onClick={() => void load()}>
-                <RefreshCw /> Try again
+                <RefreshCw /> {t("Try again")}
               </Button>
             }
           />
@@ -241,21 +245,21 @@ export function Configurations() {
             <EmptyState
               tone="primary"
               icon={<FileCode2 />}
-              title="Add your first WireGuard configuration"
-              description="Import .conf files from your VPN provider or router, paste a configuration, or simply drag files and folders onto this window."
+              title={t("Add your first WireGuard configuration")}
+              description={t("Import .conf files from your VPN provider or router, paste a configuration, or simply drag files and folders onto this window.")}
               action={
                 <>
                   <Button variant="primary" size="sm" onClick={() => void importFiles()}>
-                    <FileUp /> Import files
+                    <FileUp /> {t("Import files")}
                   </Button>
                   <Button variant="secondary" size="sm" onClick={() => void importFolder()}>
-                    <FolderOpen /> Import folder
+                    <FolderOpen /> {t("Import folder")}
                   </Button>
                   <Button variant="ghost" size="sm" onClick={() => setPasteOpen(true)}>
-                    <ClipboardPaste /> Paste
+                    <ClipboardPaste /> {t("Paste")}
                   </Button>
                   <Button variant="ghost" size="sm" onClick={() => setSshOpen(true)}>
-                    <Terminal /> SSH connection
+                    <Terminal /> {t("SSH connection")}
                   </Button>
                 </>
               }
@@ -265,8 +269,8 @@ export function Configurations() {
         ) : filtered.length === 0 ? (
           <EmptyState
             icon={<SearchX />}
-            title="No matching profiles"
-            description="Try a different search term or clear the filters."
+            title={t("No matching profiles")}
+            description={t("Try a different search term or clear the filters.")}
             action={
               hasFilters && (
                 <Button
@@ -278,7 +282,7 @@ export function Configurations() {
                     setFavOnly(false);
                   }}
                 >
-                  Clear filters
+                  {t("Clear filters")}
                 </Button>
               )
             }
@@ -290,7 +294,7 @@ export function Configurations() {
             ))}
             {hasFilters && (
               <p className="pt-2 text-center text-xs text-faint">
-                Showing {filtered.length} of {profiles.length}
+                {t("Showing {shown} of {total}", { shown: filtered.length, total: profiles.length })}
               </p>
             )}
           </div>

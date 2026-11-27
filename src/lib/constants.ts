@@ -1,13 +1,14 @@
 import type { ConnectionState } from "./types";
+import { tk } from "../i18n";
 
 export const STATE_LABEL: Record<ConnectionState, string> = {
-  disconnected: "Disconnected",
-  connecting: "Connecting",
-  connected: "Connected",
-  disconnecting: "Disconnecting",
-  reconnecting: "Reconnecting",
-  error: "Connection error",
-  protected: "Protected",
+  disconnected: tk("Disconnected"),
+  connecting: tk("Connecting"),
+  connected: tk("Connected"),
+  disconnecting: tk("Disconnecting"),
+  reconnecting: tk("Reconnecting"),
+  error: tk("Connection error"),
+  protected: tk("Protected"),
 };
 
 export type Tone = "neutral" | "primary" | "success" | "warning" | "danger";
@@ -23,13 +24,13 @@ export const STATE_TONE: Record<ConnectionState, Tone> = {
 };
 
 export const STATE_DESCRIPTION: Record<ConnectionState, string> = {
-  disconnected: "Your traffic is not protected by the VPN.",
-  connecting: "Establishing a secure tunnel…",
-  connected: "Your traffic is encrypted through the VPN.",
-  disconnecting: "Tearing down the tunnel…",
-  reconnecting: "Connection was interrupted. Restoring the tunnel…",
-  error: "The tunnel could not be established.",
-  protected: "Kill switch is blocking all traffic until the VPN is connected.",
+  disconnected: tk("Your traffic is not protected by the VPN."),
+  connecting: tk("Establishing a secure tunnel…"),
+  connected: tk("Your traffic is encrypted through the VPN."),
+  disconnecting: tk("Tearing down the tunnel…"),
+  reconnecting: tk("Connection was interrupted. Restoring the tunnel…"),
+  error: tk("The tunnel could not be established."),
+  protected: tk("Kill switch is blocking all traffic until the VPN is connected."),
 };
 
 export const isBusyState = (s: ConnectionState) => s === "connecting" || s === "disconnecting" || s === "reconnecting";

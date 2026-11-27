@@ -11,9 +11,10 @@ import { useDebounced } from "../../lib/hooks";
 import { ActionToggle } from "./RuleRow";
 import { DEFAULT_PRIORITY, MATCH_LABEL, targetKey, targetText } from "./rules";
 import { useRules, useSplit } from "./store";
+import { t, tk } from "../../i18n";
 
-const EXAMPLE = `# one entry per line — comments start with #
-bank.example.com
+const EXAMPLE_COMMENT = tk("# one entry per line — comments start with #");
+const EXAMPLE_ENTRIES = `bank.example.com
 *.cdn.example.net
 192.0.2.10
 2001:db8::/32`;
@@ -64,7 +65,7 @@ export function BulkImportDialog({ open, onOpenChange }: { open: boolean; onOpen
   const onFile = async (f: File | undefined) => {
     if (!f) return;
     if (f.size > 5 * 1024 * 1024) {
-      setError("File is larger than 5 MB.");
+      setError(t("File is larger than 5 MB."));
       return;
     }
     try {
@@ -94,7 +95,7 @@ export function BulkImportDialog({ open, onOpenChange }: { open: boolean; onOpen
           })),
         ],
       }),
-      `Imported ${fresh.length} rule${fresh.length === 1 ? "" : "s"}`,
+      fresh.length === 1 ? t("Imported {count} rule", { count: fresh.length }) : t("Imported {count} rules", { count: fresh.length }),
     );
     setBusy(false);
     if (ok) onOpenChange(false);
@@ -106,8 +107,8 @@ export function BulkImportDialog({ open, onOpenChange }: { open: boolean; onOpen
     <Dialog open={open} onOpenChange={(o) => !busy && onOpenChange(o)}>
       <DialogContent size="lg">
         <DialogHeader>
-          <DialogTitle>Bulk import rules</DialogTitle>
-          <DialogDescription>Paste domains, IPs and CIDR ranges (plain text, CSV or JSON), or load a file. Nothing is saved until you confirm.</DialogDescription>
+          <DialogTitle>{t("Bulk import rules")}</DialogTitle>
+          <DialogDescription>{t("Paste domains, IPs and CIDR ranges (plain text, CSV or JSON), or load a file. Nothing is saved until you confirm.")}</DialogDescription>
         </DialogHeader>
         <DialogBody className="flex flex-col gap-4">
           <div className="flex flex-wrap items-center gap-3">
@@ -122,11 +123,11 @@ export function BulkImportDialog({ open, onOpenChange }: { open: boolean; onOpen
               }}
             />
             <Button variant="secondary" size="sm" onClick={() => fileRef.current?.click()}>
-              <FileUp /> Load file…
+              <FileUp /> {t("Load file…")}
             </Button>
             {fileName && <span className="truncate text-xs text-muted">{fileName}</span>}
-            <div className="ml-auto flex items-center gap-2 text-xs text-muted">
-              Default action
+            <div className="ms-auto flex items-center gap-2 text-xs text-muted">
+              {t("Default action")}
               <ActionToggle value={action} onChange={setAction} size="md" />
             </div>
           </div>
@@ -136,10 +137,11 @@ export function BulkImportDialog({ open, onOpenChange }: { open: boolean; onOpen
               setText(e.target.value);
               setFileName(null);
             }}
-            placeholder={EXAMPLE}
+            placeholder={`${t(EXAMPLE_COMMENT)}\n${EXAMPLE_ENTRIES}`}
             spellCheck={false}
             className="h-48 font-mono text-[12px]"
-            aria-label="Rules to import"
+            dir="ltr"
+            aria-label={t("Rules to import")}
           />
 
           {error && (
@@ -152,27 +154,27 @@ export function BulkImportDialog({ open, onOpenChange }: { open: boolean; onOpen
           {result && upToDate && (
             <div className="flex flex-col gap-3">
               <div className="grid grid-cols-4 gap-2">
-                <Stat label="New rules" value={fresh.length} cls="text-success" />
-                <Stat label="Already present" value={alreadyPresent} cls="text-fg" />
-                <Stat label="Duplicates in input" value={result.duplicates} cls="text-fg" />
-                <Stat label="Errors" value={result.errors.length} cls="text-danger" />
+                <Stat label={t("New rules")} value={fresh.length} cls="text-success" />
+                <Stat label={t("Already present")} value={alreadyPresent} cls="text-fg" />
+                <Stat label={t("Duplicates in input")} value={result.duplicates} cls="text-fg" />
+                <Stat label={t("Errors")} value={result.errors.length} cls="text-danger" />
               </div>
               {fresh.length > 0 && (
                 <div className="max-h-44 overflow-y-auto rounded-xl border border-border">
                   {fresh.slice(0, 200).map((r, i) => (
                     <div key={i} className="flex items-center gap-2 border-b border-border px-3 py-1.5 text-[12px] last:border-b-0">
-                      <span className="selectable min-w-0 flex-1 truncate font-mono text-fg">{targetText(r.target)}</span>
-                      {r.target.type === "domain" && <Badge tone="outline">{MATCH_LABEL[r.target.mode]}</Badge>}
+                      <span className="selectable min-w-0 flex-1 truncate font-mono text-fg" dir="ltr">{targetText(r.target)}</span>
+                      {r.target.type === "domain" && <Badge tone="outline">{t(MATCH_LABEL[r.target.mode])}</Badge>}
                       {r.category && <Badge>{r.category}</Badge>}
-                      <Badge tone={r.action === "direct" ? "warning" : "primary"}>{r.action === "direct" ? "Direct" : "VPN"}</Badge>
+                      <Badge tone={r.action === "direct" ? "warning" : "primary"}>{r.action === "direct" ? t("Direct") : t("VPN")}</Badge>
                     </div>
                   ))}
-                  {fresh.length > 200 && <div className="px-3 py-1.5 text-xs text-faint">…and {fresh.length - 200} more</div>}
+                  {fresh.length > 200 && <div className="px-3 py-1.5 text-xs text-faint">{t("…and {count} more", { count: fresh.length - 200 })}</div>}
                 </div>
               )}
               {result.errors.length > 0 && (
                 <div className="max-h-32 overflow-y-auto rounded-xl border border-danger/25 bg-danger/[0.05] px-3 py-2">
-                  <ul className="list-disc space-y-0.5 pl-4 text-[12px] text-muted">
+                  <ul className="list-disc space-y-0.5 ps-4 text-[12px] text-muted">
                     {result.errors.map((e, i) => (
                       <li key={i} className="selectable">
                         {e}
@@ -186,10 +188,15 @@ export function BulkImportDialog({ open, onOpenChange }: { open: boolean; onOpen
         </DialogBody>
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>
-            Cancel
+            {t("Cancel")}
           </Button>
           <Button variant="primary" onClick={confirm} loading={busy} disabled={!upToDate || fresh.length === 0}>
-            {!busy && <Upload />} Import {fresh.length > 0 ? fresh.length : ""} rule{fresh.length === 1 ? "" : "s"}
+            {!busy && <Upload />}{" "}
+            {fresh.length === 0
+              ? t("Import rules")
+              : fresh.length === 1
+                ? t("Import {count} rule", { count: fresh.length })
+                : t("Import {count} rules", { count: fresh.length })}
           </Button>
         </DialogFooter>
       </DialogContent>

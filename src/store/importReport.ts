@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type { ImportReport } from "../lib/types";
 import { useProfiles } from "./profiles";
 import { toast } from "./toast";
+import { t, tk } from "../i18n";
 
 interface ImportReportState {
   report: ImportReport | null;
@@ -15,9 +16,9 @@ interface ImportReportState {
 
 export const useImportReport = create<ImportReportState>((set, get) => ({
   report: null,
-  title: "Import report",
+  title: tk("Import report"),
   busy: false,
-  show: (report, title = "Import report") => set({ report, title }),
+  show: (report, title = t("Import report")) => set({ report, title }),
   close: () => set({ report: null }),
   run: async (fn, title) => {
     set({ busy: true });
@@ -27,7 +28,7 @@ export const useImportReport = create<ImportReportState>((set, get) => ({
       void useProfiles.getState().load();
       return report;
     } catch (e) {
-      toast.error("Import failed", e);
+      toast.error(t("Import failed"), e);
       return null;
     } finally {
       set({ busy: false });

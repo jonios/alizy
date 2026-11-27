@@ -12,6 +12,7 @@ import { useProfiles } from "../../store/profiles";
 import { useStatus } from "../../store/status";
 import { useNav } from "../../store/nav";
 import { STATE_TONE, TONE_BG, isBusyState } from "../../lib/constants";
+import { t } from "../../i18n";
 
 export function quickOrder(profiles: ProfileSummary[]): ProfileSummary[] {
   return [...profiles].sort((a, b) => {
@@ -36,11 +37,11 @@ export function QuickSwitcher({ disabled }: { disabled: boolean }) {
     <Card>
       <CardHeader
         icon={<Zap />}
-        title="Quick switch"
-        description="Favorites first, then most recently used"
+        title={t("Quick switch")}
+        description={t("Favorites first, then most recently used")}
         action={
           <Button variant="ghost" size="sm" onClick={() => go("configurations")}>
-            All configurations <ArrowRight />
+            {t("All configurations")} <ArrowRight className="rtl:-scale-x-100" />
           </Button>
         }
       />
@@ -52,15 +53,15 @@ export function QuickSwitcher({ disabled }: { disabled: boolean }) {
             ))}
           </div>
         ) : error && profiles.length === 0 ? (
-          <EmptyState tone="danger" icon={<FileCode2 />} title="Couldn’t load profiles" description={error} className="py-8" />
+          <EmptyState tone="danger" icon={<FileCode2 />} title={t("Couldn’t load profiles")} description={error} className="py-8" />
         ) : list.length === 0 ? (
           <EmptyState
             icon={<FileCode2 />}
-            title="No configurations yet"
-            description="Import a WireGuard .conf file to get started. You can also drag files onto this window."
+            title={t("No configurations yet")}
+            description={t("Import a WireGuard .conf file to get started. You can also drag files onto this window.")}
             action={
               <Button variant="primary" size="sm" onClick={() => go("configurations")}>
-                Import configuration
+                {t("Import configuration")}
               </Button>
             }
             className="py-8"
@@ -81,9 +82,9 @@ export function QuickSwitcher({ disabled }: { disabled: boolean }) {
                 >
                   <button
                     type="button"
-                    className="flex min-w-0 flex-1 items-center gap-3 text-left focus-visible:outline-2 focus-visible:outline-ring"
+                    className="flex min-w-0 flex-1 items-center gap-3 text-start focus-visible:outline-2 focus-visible:outline-ring"
                     onClick={() => openDetails(p.id)}
-                    aria-label={`Open details for ${p.name}`}
+                    aria-label={t("Open details for {name}", { name: p.name })}
                   >
                     <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-surface-2 text-[13px] font-semibold text-muted uppercase">
                       {p.name.slice(0, 2)}
@@ -91,16 +92,17 @@ export function QuickSwitcher({ disabled }: { disabled: boolean }) {
                     <div className="min-w-0">
                       <div className="flex items-center gap-1.5">
                         <span className="truncate text-[13px] font-medium text-fg">{p.name}</span>
-                        {p.favorite && <Star className="size-3 shrink-0 fill-warning text-warning" aria-label="Favorite" />}
+                        {p.favorite && <Star className="size-3 shrink-0 fill-warning text-warning" aria-label={t("Favorite")} />}
                         {tone && <Dot className={TONE_BG[tone]} pulse={status ? isBusyState(status.state) : false} />}
                       </div>
                       <div className="truncate text-xs text-faint">
-                        {endpointLabel(p) ?? "No endpoint"} · {p.last_connected_at ? relativeTime(p.last_connected_at) : "never used"}
+                        {endpointLabel(p) !== null ? <span dir="ltr">{endpointLabel(p)}</span> : t("No endpoint")} ·{" "}
+                        {p.last_connected_at ? relativeTime(p.last_connected_at) : t("never used")}
                       </div>
                     </div>
                   </button>
                   {active ? (
-                    <span className="text-xs font-medium text-primary">Active</span>
+                    <span className="text-xs font-medium text-primary">{t("Active")}</span>
                   ) : (
                     <Button
                       size="xs"
@@ -110,7 +112,7 @@ export function QuickSwitcher({ disabled }: { disabled: boolean }) {
                       disabled={disabled || (pending !== null && !isPending)}
                       className="opacity-80 group-hover:opacity-100"
                     >
-                      Connect
+                      {t("Connect")}
                     </Button>
                   )}
                 </div>

@@ -1,4 +1,5 @@
 // Frontend-only input validation used for hints before the backend checks.
+import { t } from "../i18n";
 
 export function isIPv4(s: string): boolean {
   const parts = s.split(".");
@@ -31,17 +32,17 @@ export type NetCheck = { ok: true; normalized: string; family: 4 | 6 } | { ok: f
 
 export function checkNet(input: string): NetCheck {
   const s = input.trim();
-  if (!s) return { ok: false, error: "Enter an IP address or CIDR range." };
+  if (!s) return { ok: false, error: t("Enter an IP address or CIDR range.") };
   const [addr, prefix, ...rest] = s.split("/");
-  if (rest.length) return { ok: false, error: "Too many “/” characters." };
+  if (rest.length) return { ok: false, error: t("Too many “/” characters.") };
   const family = isIPv4(addr) ? 4 : isIPv6(addr) ? 6 : null;
-  if (!family) return { ok: false, error: "Not a valid IPv4 or IPv6 address." };
+  if (!family) return { ok: false, error: t("Not a valid IPv4 or IPv6 address.") };
   if (prefix !== undefined) {
     const max = family === 4 ? 32 : 128;
     if (!/^\d{1,3}$/.test(prefix) || Number(prefix) > max) {
-      return { ok: false, error: `Prefix length must be 0–${max} for IPv${family}.` };
+      return { ok: false, error: t("Prefix length must be 0–{max} for IPv{family}.", { max, family }) };
     }
-    if (Number(prefix) === 0) return { ok: false, error: "A /0 rule would cover the whole internet." };
+    if (Number(prefix) === 0) return { ok: false, error: t("A /0 rule would cover the whole internet.") };
   }
   return { ok: true, normalized: prefix !== undefined ? `${addr.toLowerCase()}/${prefix}` : addr.toLowerCase(), family };
 }
@@ -58,19 +59,19 @@ export type DomainCheck = { ok: true; domain: string; wildcard: boolean } | { ok
 
 export function checkDomain(input: string): DomainCheck {
   let s = input.trim().toLowerCase().replace(/\.$/, "");
-  if (!s) return { ok: false, error: "Enter a domain name." };
-  if (/^[a-z]+:\/\//.test(s)) return { ok: false, error: "Enter just the host name, without http:// or a path." };
-  if (s.includes("/")) return { ok: false, error: "Enter just the host name, without a path." };
+  if (!s) return { ok: false, error: t("Enter a domain name.") };
+  if (/^[a-z]+:\/\//.test(s)) return { ok: false, error: t("Enter just the host name, without http:// or a path.") };
+  if (s.includes("/")) return { ok: false, error: t("Enter just the host name, without a path.") };
   let wildcard = false;
   if (s.startsWith("*.")) {
     wildcard = true;
     s = s.slice(2);
   }
-  if (s.includes("*")) return { ok: false, error: "A wildcard is only allowed as the leading “*.” label." };
-  if (isIP(s)) return { ok: false, error: "That is an IP address — add it on the IP Addresses tab." };
+  if (s.includes("*")) return { ok: false, error: t("A wildcard is only allowed as the leading “*.” label.") };
+  if (isIP(s)) return { ok: false, error: t("That is an IP address — add it on the IP Addresses tab.") };
   const labels = s.split(".");
-  if (labels.length < 2) return { ok: false, error: "Use a fully-qualified name such as bank.example.com." };
-  if (s.length > 253 || !labels.every((l) => LABEL.test(l))) return { ok: false, error: "Contains invalid characters or empty labels." };
+  if (labels.length < 2) return { ok: false, error: t("Use a fully-qualified name such as bank.example.com.") };
+  if (s.length > 253 || !labels.every((l) => LABEL.test(l))) return { ok: false, error: t("Contains invalid characters or empty labels.") };
   return { ok: true, domain: s, wildcard };
 }
 
@@ -115,20 +116,20 @@ export function ipv4FromMapped(raw: string): string | null {
  */
 export function sshHostError(raw: string): string | null {
   const trimmed = raw.trim();
-  if (!trimmed) return "Enter the server's IP address.";
+  if (!trimmed) return t("Enter the server's IP address.");
   const host = ipv4FromMapped(trimmed) ?? trimmed;
   if (isIPv4(host)) {
     const first = Number(host.split(".")[0]);
-    if (host === "0.0.0.0") return "0.0.0.0 is not a valid server address.";
-    if (first === 127) return "Loopback addresses (127.0.0.0/8) are not allowed.";
-    if (first >= 224 && first <= 239) return "Multicast addresses are not allowed.";
+    if (host === "0.0.0.0") return t("0.0.0.0 is not a valid server address.");
+    if (first === 127) return t("Loopback addresses (127.0.0.0/8) are not allowed.");
+    if (first >= 224 && first <= 239) return t("Multicast addresses are not allowed.");
     return null;
   }
   const g = ipv6Groups(host);
-  if (!g) return "Enter a valid IPv4 or IPv6 address (host names are not supported).";
-  if (g.every((x) => x === 0)) return ":: is not a valid server address.";
-  if (g.slice(0, 7).every((x) => x === 0) && g[7] === 1) return "The loopback address ::1 is not allowed.";
-  if ((g[0] & 0xff00) === 0xff00) return "Multicast addresses are not allowed.";
+  if (!g) return t("Enter a valid IPv4 or IPv6 address (host names are not supported).");
+  if (g.every((x) => x === 0)) return t(":: is not a valid server address.");
+  if (g.slice(0, 7).every((x) => x === 0) && g[7] === 1) return t("The loopback address ::1 is not allowed.");
+  if ((g[0] & 0xff00) === 0xff00) return t("Multicast addresses are not allowed.");
   return null;
 }
 
@@ -144,29 +145,29 @@ export interface SshFields {
 export function validateSsh(f: SshFields, opts: { editing: boolean }): Partial<Record<keyof SshFields, string>> {
   const errors: Partial<Record<keyof SshFields, string>> = {};
   const name = f.name.trim();
-  if (!name) errors.name = "Enter a name.";
-  else if ([...name].length > 64) errors.name = "Use 64 characters or fewer.";
+  if (!name) errors.name = t("Enter a name.");
+  else if ([...name].length > 64) errors.name = t("Use 64 characters or fewer.");
 
   const hostErr = sshHostError(f.host);
   if (hostErr) errors.host = hostErr;
 
   const port = f.port.trim();
-  if (!/^\d+$/.test(port) || Number(port) < 1 || Number(port) > 65535) errors.port = "Port must be a whole number from 1 to 65535.";
+  if (!/^\d+$/.test(port) || Number(port) < 1 || Number(port) > 65535) errors.port = t("Port must be a whole number from 1 to 65535.");
 
   const u = f.username;
-  if (!u) errors.username = "Enter the username.";
-  else if ([...u].length > 64) errors.username = "Use 64 characters or fewer.";
-  else if (/[\s\u0000-\u001f\u007f]/.test(u)) errors.username = "The username can't contain spaces or control characters.";
-  else if (u.startsWith("-")) errors.username = "The username can't start with “-”.";
-  else if (u.includes("@")) errors.username = "The username can't contain “@”.";
+  if (!u) errors.username = t("Enter the username.");
+  else if ([...u].length > 64) errors.username = t("Use 64 characters or fewer.");
+  else if (/[\s\u0000-\u001f\u007f]/.test(u)) errors.username = t("The username can't contain spaces or control characters.");
+  else if (u.startsWith("-")) errors.username = t("The username can't start with “-”.");
+  else if (u.includes("@")) errors.username = t("The username can't contain “@”.");
 
   const p = f.password;
   if (!p) {
-    if (!opts.editing) errors.password = "Enter the password.";
+    if (!opts.editing) errors.password = t("Enter the password.");
   } else if (/[\u0000\r\n]/.test(p)) {
-    errors.password = "The password can't contain line breaks or NUL characters.";
+    errors.password = t("The password can't contain line breaks or NUL characters.");
   } else if (new TextEncoder().encode(p).length > 1024) {
-    errors.password = "The password is too long (1024 bytes at most).";
+    errors.password = t("The password is too long (1024 bytes at most).");
   }
   return errors;
 }

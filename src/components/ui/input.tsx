@@ -20,8 +20,8 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(({ className, inva
       className={cn(
         FIELD,
         "h-9 px-3",
-        leading && "pl-9",
-        trailing && "pr-9",
+        leading && "ps-9",
+        trailing && "pe-9",
         invalid && "border-danger/70 focus:border-danger focus:ring-danger/20",
         !leading && !trailing && className,
       )}
@@ -32,10 +32,10 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(({ className, inva
   return (
     <div className={cn("relative", className)}>
       {leading && (
-        <span className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-faint [&_svg]:size-4">{leading}</span>
+        <span className="pointer-events-none absolute inset-y-0 start-3 flex items-center text-faint [&_svg]:size-4">{leading}</span>
       )}
       {input}
-      {trailing && <span className="absolute inset-y-0 right-2 flex items-center">{trailing}</span>}
+      {trailing && <span className="absolute inset-y-0 end-2 flex items-center">{trailing}</span>}
     </div>
   );
 });

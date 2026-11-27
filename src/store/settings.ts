@@ -3,6 +3,7 @@ import { api } from "../lib/api";
 import type { AppInfo, AppSettings } from "../lib/types";
 import { errMsg } from "../lib/utils";
 import { toast } from "./toast";
+import { t } from "../i18n";
 
 interface SettingsState {
   settings: AppSettings | null;
@@ -54,7 +55,7 @@ export const useSettings = create<SettingsState>((set, get) => ({
       return true;
     } catch (e) {
       set({ settings: prev });
-      toast.error("Could not save settings", e);
+      toast.error(t("Could not save settings"), e);
       return false;
     } finally {
       set({ saving: false });

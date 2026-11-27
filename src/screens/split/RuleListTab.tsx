@@ -9,6 +9,7 @@ import { RuleRow } from "./RuleRow";
 import { RuleEditDialog } from "./RuleEditDialog";
 import { targetKey, targetText } from "./rules";
 import { useSplit } from "./store";
+import { t } from "../../i18n";
 
 /** Lists rules of one kind with filter, duplicate detection and shared-IP warnings. */
 export function RuleListTab({
@@ -60,10 +61,12 @@ export function RuleListTab({
         <>
           <div className="flex items-center justify-between gap-3">
             <div className="text-xs text-muted">
-              {rules.length} rule{rules.length === 1 ? "" : "s"} · {rules.filter((r) => r.enabled).length} enabled
+              {rules.length === 1
+                ? t("{count} rule · {on} enabled", { count: rules.length, on: rules.filter((r) => r.enabled).length })
+                : t("{count} rules · {on} enabled", { count: rules.length, on: rules.filter((r) => r.enabled).length })}
             </div>
             {rules.length > 6 && (
-              <Input leading={<Search />} value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter rules…" className="w-60" aria-label="Filter rules" />
+              <Input leading={<Search />} value={filter} onChange={(e) => setFilter(e.target.value)} placeholder={t("Filter rules…")} className="w-60" aria-label={t("Filter rules")} />
             )}
           </div>
           <div className="flex flex-col gap-2">
@@ -80,7 +83,7 @@ export function RuleListTab({
                     warns && (
                       <Tooltip
                         content={
-                          <ul className="list-disc pl-4">
+                          <ul className="list-disc ps-4">
                             {warns.map((w, i) => (
                               <li key={i}>{w}</li>
                             ))}
@@ -89,7 +92,7 @@ export function RuleListTab({
                       >
                         <span tabIndex={0}>
                           <Badge tone="warning">
-                            <TriangleAlert /> Shared IP
+                            <TriangleAlert /> {t("Shared IP")}
                           </Badge>
                         </span>
                       </Tooltip>
@@ -98,7 +101,7 @@ export function RuleListTab({
                 />
               );
             })}
-            {shown.length === 0 && <div className="py-6 text-center text-[13px] text-muted">No rules match “{filter}”.</div>}
+            {shown.length === 0 && <div className="py-6 text-center text-[13px] text-muted">{t("No rules match “{filter}”.", { filter })}</div>}
           </div>
         </>
       )}

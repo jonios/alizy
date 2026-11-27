@@ -4,6 +4,7 @@ import { Card, CardHeader } from "../../components/ui/card";
 import { formatBytes, formatRate } from "../../lib/format";
 import { useStatus } from "../../store/status";
 import { Sparkline } from "./Sparkline";
+import { t } from "../../i18n";
 
 export function TrafficCard({ active }: { active: boolean }) {
   const stats = useStatus((s) => s.status?.stats ?? null);
@@ -16,21 +17,21 @@ export function TrafficCard({ active }: { active: boolean }) {
     <Card className="flex flex-col">
       <CardHeader
         icon={<Activity />}
-        title="Traffic"
-        description={active ? "Live throughput over the last minute" : "Connect to see live throughput"}
+        title={t("Traffic")}
+        description={active ? t("Live throughput over the last minute") : t("Connect to see live throughput")}
       />
       <div className="grid grid-cols-2 gap-3 px-5">
         <Metric
           icon={<ArrowDown className="size-3.5" />}
           tone="text-primary bg-primary/12"
-          label="Download"
+          label={t("Download")}
           rate={formatRate(rx)}
           total={stats && active ? formatBytes(stats.rx_bytes) : "—"}
         />
         <Metric
           icon={<ArrowUp className="size-3.5" />}
           tone="text-success bg-success/12"
-          label="Upload"
+          label={t("Upload")}
           rate={formatRate(tx)}
           total={stats && active ? formatBytes(stats.tx_bytes) : "—"}
         />
@@ -38,7 +39,7 @@ export function TrafficCard({ active }: { active: boolean }) {
       <div className="relative mt-3 h-[72px] overflow-hidden rounded-b-2xl">
         <Sparkline points={active ? rates : []} height={72} />
         {active && rates.length < 2 && (
-          <div className="absolute inset-0 flex items-center justify-center text-xs text-faint">Collecting samples…</div>
+          <div className="absolute inset-0 flex items-center justify-center text-xs text-faint">{t("Collecting samples…")}</div>
         )}
       </div>
     </Card>
@@ -53,7 +54,7 @@ function Metric({ icon, tone, label, rate, total }: { icon: ReactNode; tone: str
         {label}
       </div>
       <div className="mt-1.5 text-xl font-semibold tracking-tight text-fg tabular">{rate}</div>
-      <div className="text-xs text-faint tabular">Total {total}</div>
+      <div className="text-xs text-faint tabular">{t("Total {total}", { total })}</div>
     </div>
   );
 }

@@ -3,6 +3,7 @@ import { api } from "../../lib/api";
 import type { SplitConfig, SplitRule, SplitStatus } from "../../lib/types";
 import { errMsg } from "../../lib/utils";
 import { toast } from "../../store/toast";
+import { t } from "../../i18n";
 
 interface SplitState {
   data: SplitStatus | null;
@@ -47,7 +48,7 @@ export const useSplit = create<SplitState>((set, get) => ({
       return true;
     } catch (e) {
       set({ data: prev, saving: false });
-      toast.error("Could not save split tunneling rules", e);
+      toast.error(t("Could not save split tunneling rules"), e);
       return false;
     }
   },

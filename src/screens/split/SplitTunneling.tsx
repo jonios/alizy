@@ -37,6 +37,7 @@ import { CategoriesTab } from "./CategoriesTab";
 import { ActiveRulesTab } from "./ActiveRulesTab";
 import { RoutingTest } from "./RoutingTest";
 import { BulkImportDialog } from "./BulkImportDialog";
+import { t } from "../../i18n";
 
 export function SplitTunneling() {
   const { data, loaded, error, saving, load, mutate } = useSplit();
@@ -65,21 +66,21 @@ export function SplitTunneling() {
     let path: string | null;
     try {
       path = await save({
-        title: "Export split tunneling rules",
+        title: t("Export split tunneling rules"),
         defaultPath: "alizy-split-rules.json",
         filters: [{ name: "JSON", extensions: ["json"] }],
       });
     } catch (e) {
-      toast.error("Could not open the save dialog", e);
+      toast.error(t("Could not open the save dialog"), e);
       return;
     }
     if (!path) return;
     setExporting(true);
     try {
       const n = await api.splitExport(path);
-      toast.success(`Exported ${n} rule${n === 1 ? "" : "s"}`, path);
+      toast.success(n === 1 ? t("Exported {count} rule", { count: n }) : t("Exported {count} rules", { count: n }), path);
     } catch (e) {
-      toast.error("Export failed", e);
+      toast.error(t("Export failed"), e);
     } finally {
       setExporting(false);
     }
@@ -88,20 +89,20 @@ export function SplitTunneling() {
   return (
     <>
       <ScreenHeader
-        title="Split Tunneling"
-        description="Choose which destinations bypass the VPN."
+        title={t("Split Tunneling")}
+        description={t("Choose which destinations bypass the VPN.")}
         actions={
           <>
             {saving && (
               <span className="flex items-center gap-1.5 text-xs text-muted">
-                <RefreshCw className="size-3.5 animate-spin" /> Saving…
+                <RefreshCw className="size-3.5 animate-spin" /> {t("Saving…")}
               </span>
             )}
             <Button variant="ghost" size="sm" onClick={doExport} loading={exporting} disabled={!data}>
-              {!exporting && <Download />} Export
+              {!exporting && <Download />} {t("Export")}
             </Button>
             <Button variant="secondary" size="sm" onClick={() => setBulkOpen(true)} disabled={!data}>
-              <Upload /> Bulk import
+              <Upload /> {t("Bulk import")}
             </Button>
           </>
         }
@@ -117,11 +118,11 @@ export function SplitTunneling() {
           <EmptyState
             tone="danger"
             icon={<Split />}
-            title="Couldn’t load split tunneling"
+            title={t("Couldn’t load split tunneling")}
             description={<span className="selectable">{error}</span>}
             action={
               <Button variant="secondary" size="sm" onClick={() => void load()}>
-                <RefreshCw /> Try again
+                <RefreshCw /> {t("Try again")}
               </Button>
             }
           />
@@ -129,14 +130,14 @@ export function SplitTunneling() {
           <>
             {error && (
               <div className="flex items-center gap-2 rounded-xl border border-warning/30 bg-warning/[0.06] px-4 py-2 text-xs text-muted">
-                <TriangleAlert className="size-3.5 text-warning" /> Live refresh failed: <span className="selectable">{error}</span>
+                <TriangleAlert className="size-3.5 text-warning" /> {t("Live refresh failed:")} <span className="selectable">{error}</span>
               </div>
             )}
 
             <Card className="relative overflow-hidden p-5">
               <div
                 className={cn(
-                  "pointer-events-none absolute inset-y-0 left-0 w-1 transition-colors",
+                  "pointer-events-none absolute inset-y-0 start-0 w-1 transition-colors",
                   data.config.enabled ? "bg-primary" : "bg-border-strong",
                 )}
                 aria-hidden
@@ -153,18 +154,18 @@ export function SplitTunneling() {
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
                     <label htmlFor="split-master" className="text-[15px] font-semibold text-fg">
-                      Split tunneling
+                      {t("Split tunneling")}
                     </label>
                     {data.config.enabled && <SplitStateBadges data={data} />}
                   </div>
-                  <p className="mt-0.5 text-[13px] text-muted">Everything uses the VPN by default; Direct rules bypass it.</p>
+                  <p className="mt-0.5 text-[13px] text-muted">{t("Everything uses the VPN by default; Direct rules bypass it.")}</p>
                   {data.config.enabled && <SplitStateNote data={data} />}
                 </div>
                 <Switch
                   id="split-master"
                   checked={data.config.enabled}
                   onCheckedChange={(enabled) =>
-                    void mutate((c) => ({ ...c, enabled }), enabled ? "Split tunneling enabled" : "Split tunneling disabled")
+                    void mutate((c) => ({ ...c, enabled }), enabled ? t("Split tunneling enabled") : t("Split tunneling disabled"))
                   }
                 />
               </div>
@@ -176,16 +177,21 @@ export function SplitTunneling() {
                   <TriangleAlert className="mt-0.5 size-5 shrink-0 text-warning" />
                   <div className="min-w-0 flex-1">
                     <div className="text-[13px] font-semibold text-fg">
-                      {data.warnings.length} shared address warning{data.warnings.length === 1 ? "" : "s"}
+                      {data.warnings.length === 1
+                        ? t("{count} shared address warning", { count: data.warnings.length })
+                        : t("{count} shared address warnings", { count: data.warnings.length })}
                     </div>
                     <p className="mt-0.5 text-[13px] leading-relaxed text-muted">
-                      Routing works per IP address. When a bypassed domain shares an address with other sites — common with CDNs
-                      and shared hosting — traffic to <i>those</i> sites will bypass the VPN too.
+                      {t(
+                        "Routing works per IP address. When a bypassed domain shares an address with other sites — common with CDNs and shared hosting — traffic to those sites will bypass the VPN too.",
+                      )}
                     </p>
                     <ul className="mt-2.5 flex flex-col gap-1.5">
                       {data.warnings.map((w, i) => (
                         <li key={i} className="rounded-lg border border-warning/20 bg-background/50 px-3 py-1.5 text-xs">
-                          <span className="selectable font-mono text-fg">{w.ip}</span>
+                          <span className="selectable font-mono text-fg" dir="ltr">
+                            {w.ip}
+                          </span>
                           <span className="text-muted"> — {w.message}</span>
                           {w.rule_ids.length > 0 && (
                             <span className="text-faint">
@@ -211,22 +217,22 @@ export function SplitTunneling() {
               <div className="overflow-x-auto pb-1">
                 <TabsList>
                   <TabsTrigger value="domains">
-                    <Globe /> Domains <Count n={counts.domain} />
+                    <Globe /> {t("Domains")} <Count n={counts.domain} />
                   </TabsTrigger>
                   <TabsTrigger value="ips">
-                    <Binary /> IP Addresses <Count n={counts.ip} />
+                    <Binary /> {t("IP Addresses")} <Count n={counts.ip} />
                   </TabsTrigger>
                   <TabsTrigger value="apps">
-                    <AppWindow /> Applications
+                    <AppWindow /> {t("Applications")}
                   </TabsTrigger>
                   <TabsTrigger value="categories">
-                    <Tags /> Categories
+                    <Tags /> {t("Categories")}
                   </TabsTrigger>
                   <TabsTrigger value="active">
-                    <ListOrdered /> Active Rules <Count n={counts.active} />
+                    <ListOrdered /> {t("Active Rules")} <Count n={counts.active} />
                   </TabsTrigger>
                   <TabsTrigger value="test">
-                    <FlaskConical /> Routing Test
+                    <FlaskConical /> {t("Routing Test")}
                   </TabsTrigger>
                 </TabsList>
               </div>
@@ -279,21 +285,22 @@ function Limitations() {
         type="button"
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
-        className="flex w-full items-center gap-2 px-4 py-3 text-left text-[13px] font-medium text-muted hover:text-fg focus-visible:outline-2 focus-visible:outline-ring"
+        className="flex w-full items-center gap-2 px-4 py-3 text-start text-[13px] font-medium text-muted hover:text-fg focus-visible:outline-2 focus-visible:outline-ring"
       >
         <Info className="size-4" />
-        Limitations
-        <ChevronRight className={cn("ml-auto size-4 transition-transform", open && "rotate-90")} />
+        {t("Limitations")}
+        <ChevronRight className={cn("ms-auto size-4 transition-transform rtl:-scale-x-100", open && "rotate-90 rtl:-rotate-90")} />
       </button>
       {open && (
-        <ul className="list-disc space-y-1.5 px-4 pb-4 pl-10 text-[13px] leading-relaxed text-muted">
+        <ul className="list-disc space-y-1.5 px-4 pb-4 ps-10 text-[13px] leading-relaxed text-muted">
           <li>
-            Apps that use their own DNS-over-HTTPS (some browsers) may receive different addresses than the system resolver, so their
-            domain rules may not match. That traffic then stays inside the VPN — it fails safe.
+            {t(
+              "Apps that use their own DNS-over-HTTPS (some browsers) may receive different addresses than the system resolver, so their domain rules may not match. That traffic then stays inside the VPN — it fails safe.",
+            )}
           </li>
-          <li>Wildcard and parent-domain rules only apply to names Alizy has resolved; arbitrary unseen subdomains aren’t known in advance.</li>
-          <li>Routing is per IP address. Bypassing an address shared by a CDN also bypasses the other sites hosted there.</li>
-          <li>Per-application rules are not available on Linux in this build.</li>
+          <li>{t("Wildcard and parent-domain rules only apply to names Alizy has resolved; arbitrary unseen subdomains aren’t known in advance.")}</li>
+          <li>{t("Routing is per IP address. Bypassing an address shared by a CDN also bypasses the other sites hosted there.")}</li>
+          <li>{t("Per-application rules are not available on Linux in this build.")}</li>
         </ul>
       )}
     </div>
@@ -304,29 +311,34 @@ function SplitStateBadges({ data }: { data: SplitData }) {
   const st = useSplitState(data);
   return (
     <>
-      {st.firewall === "installed" && <Badge tone="success">Installed in firewall</Badge>}
-      {st.firewall === "unverified" && <Badge tone="warning">Firewall not verified</Badge>}
-      {st.firewall === "not-needed" && <Badge tone="outline">Not installed</Badge>}
-      {st.traffic === "bypassing" && <Badge tone="success">Active · bypassing the VPN</Badge>}
-      {st.traffic === "through-ks" && <Badge tone="success">Active · allowed through kill switch</Badge>}
-      {st.traffic === "inactive" && <Badge tone="outline">Inactive · VPN disconnected</Badge>}
-      {st.traffic === "no-addresses" && <Badge tone="outline">No bypass addresses yet</Badge>}
+      {st.firewall === "installed" && <Badge tone="success">{t("Installed in firewall")}</Badge>}
+      {st.firewall === "unverified" && <Badge tone="warning">{t("Firewall not verified")}</Badge>}
+      {st.firewall === "not-needed" && <Badge tone="outline">{t("Not installed")}</Badge>}
+      {st.traffic === "bypassing" && <Badge tone="success">{t("Active · bypassing the VPN")}</Badge>}
+      {st.traffic === "through-ks" && <Badge tone="success">{t("Active · allowed through kill switch")}</Badge>}
+      {st.traffic === "inactive" && <Badge tone="outline">{t("Inactive · VPN disconnected")}</Badge>}
+      {st.traffic === "no-addresses" && <Badge tone="outline">{t("No bypass addresses yet")}</Badge>}
     </>
   );
 }
 
 function SplitStateNote({ data }: { data: SplitData }) {
   const st = useSplitState(data);
-  const n = `${st.ranges} address range${st.ranges === 1 ? "" : "s"}`;
+  const one = st.ranges === 1;
+  const count = st.ranges;
   const text =
     st.firewall === "unverified"
-      ? "The firewall state could not be verified yet. Direct rules may not be in effect."
+      ? t("The firewall state could not be verified yet. Direct rules may not be in effect.")
       : st.traffic === "bypassing"
-        ? `${n} currently bypass the VPN; everything else goes through the tunnel.`
+        ? one
+          ? t("{count} address range currently bypasses the VPN; everything else goes through the tunnel.", { count })
+          : t("{count} address ranges currently bypass the VPN; everything else goes through the tunnel.", { count })
         : st.traffic === "through-ks"
-          ? `The VPN is disconnected and the kill switch is on: only Direct addresses (${n}) can be reached.`
+          ? one
+            ? t("The VPN is disconnected and the kill switch is on: only Direct addresses ({count} address range) can be reached.", { count })
+            : t("The VPN is disconnected and the kill switch is on: only Direct addresses ({count} address ranges) can be reached.", { count })
           : st.traffic === "inactive"
-            ? "The VPN is disconnected, so all traffic already uses your normal connection. Direct rules take effect when you connect."
-            : "No Direct addresses are resolved yet, so nothing bypasses the VPN.";
+            ? t("The VPN is disconnected, so all traffic already uses your normal connection. Direct rules take effect when you connect.")
+            : t("No Direct addresses are resolved yet, so nothing bypasses the VPN.");
   return <p className="mt-1 text-[12px] text-faint">{text}</p>;
 }

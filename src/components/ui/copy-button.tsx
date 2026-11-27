@@ -4,8 +4,9 @@ import { copyText } from "../../lib/utils";
 import { toast } from "../../store/toast";
 import { Button, type ButtonSize } from "./button";
 import { Tooltip } from "./tooltip";
+import { t } from "../../i18n";
 
-export function CopyButton({ text, label = "Copy", size = "icon-sm", className }: { text: string; label?: string; size?: ButtonSize; className?: string }) {
+export function CopyButton({ text, label = t("Copy"), size = "icon-sm", className }: { text: string; label?: string; size?: ButtonSize; className?: string }) {
   const [done, setDone] = useState(false);
   useEffect(() => {
     if (!done) return;
@@ -13,7 +14,7 @@ export function CopyButton({ text, label = "Copy", size = "icon-sm", className }
     return () => window.clearTimeout(t);
   }, [done]);
   return (
-    <Tooltip content={done ? "Copied" : label}>
+    <Tooltip content={done ? t("Copied") : label}>
       <Button
         variant="ghost"
         size={size}
@@ -24,7 +25,7 @@ export function CopyButton({ text, label = "Copy", size = "icon-sm", className }
             await copyText(text);
             setDone(true);
           } catch (e) {
-            toast.error("Could not copy to clipboard", e);
+            toast.error(t("Could not copy to clipboard"), e);
           }
         }}
       >

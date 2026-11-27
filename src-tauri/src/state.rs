@@ -40,8 +40,8 @@ impl AppSettings {
         if !["dark", "light", "system"].contains(&self.theme.as_str()) {
             return Err("invalid theme".into());
         }
-        if self.language != "en" {
-            return Err("only English is available in this build".into());
+        if !["en", "fa"].contains(&self.language.as_str()) {
+            return Err("unsupported language".into());
         }
         if self.auto_updates {
             return Err("no update channel is configured for this build".into());

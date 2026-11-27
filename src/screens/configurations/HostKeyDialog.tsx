@@ -8,6 +8,7 @@ import { useSshFlow } from "../../store/sshFlow";
 import { useStatus } from "../../store/status";
 import { toast } from "../../store/toast";
 import { SshProfileDialog } from "./SshProfileDialog";
+import { t } from "../../i18n";
 
 /** Mounted once in App: the dialogs the SSH connect flow opens (host key trust, password re-entry). */
 export function SshFlowDialogs() {
@@ -45,8 +46,9 @@ function HostKeyDialog() {
   const open = !!prompt;
   const changed = !!prompt?.changed;
   const hostPort = profile?.ssh
-    ? `${profile.ssh.host.includes(":") ? `[${profile.ssh.host}]` : profile.ssh.host}:${profile.ssh.port}`
-    : "this server";
+    ? // Isolated (LRI…PDI) so the address keeps its order inside a right-to-left sentence.
+      `\u2066${profile.ssh.host.includes(":") ? `[${profile.ssh.host}]` : profile.ssh.host}:${profile.ssh.port}\u2069`
+    : t("this server");
 
   const trust = async () => {
     if (!prompt) return;
@@ -59,7 +61,7 @@ function HostKeyDialog() {
       void useProfiles.getState().load();
       void useStatus.getState().connect(id);
     } catch (e) {
-      toast.error("Could not save the host key", e);
+      toast.error(t("Could not save the host key"), e);
       setBusy(false);
     }
   };
@@ -74,7 +76,7 @@ function HostKeyDialog() {
       >
         {prompt && (
           <>
-            <DialogHeader className="pr-6">
+            <DialogHeader className="pe-6">
               <div className="flex items-start gap-3">
                 <div
                   className={`flex size-9 shrink-0 items-center justify-center rounded-full [&_svg]:size-[18px] ${
@@ -84,36 +86,40 @@ function HostKeyDialog() {
                   {changed ? <ShieldAlert /> : <ShieldQuestion />}
                 </div>
                 <div className="flex min-w-0 flex-col gap-1.5">
-                  <DialogTitle>{changed ? "Server identity changed" : "Verify server identity"}</DialogTitle>
+                  <DialogTitle>{changed ? t("Server identity changed") : t("Verify server identity")}</DialogTitle>
                   <DialogDescription>
                     {changed
-                      ? `The key for ${hostPort} is different from the one you trusted. This can mean someone is intercepting the connection.`
-                      : `First connection to ${hostPort}. Make sure this fingerprint matches the server's:`}
+                      ? t("The key for {host} is different from the one you trusted. This can mean someone is intercepting the connection.", { host: hostPort })
+                      : t("First connection to {host}. Make sure this fingerprint matches the server's:", { host: hostPort })}
                   </DialogDescription>
                 </div>
               </div>
             </DialogHeader>
             <DialogBody>
-              <div className="selectable rounded-xl border border-border bg-surface-2 px-3.5 py-3 font-mono text-[12px] break-all text-fg">
+              <div
+                dir="ltr"
+                className="selectable rounded-xl border border-border bg-surface-2 px-3.5 py-3 font-mono text-[12px] break-all text-fg"
+              >
                 {prompt.fingerprint}
               </div>
               {changed && profile?.ssh?.host_key_fingerprint && (
                 <p className="mt-2 text-xs text-muted">
-                  Previously trusted: <span className="selectable font-mono break-all">{profile.ssh.host_key_fingerprint}</span>
+                  {t("Previously trusted:")}{" "}
+                  <span className="selectable font-mono break-all" dir="ltr">{profile.ssh.host_key_fingerprint}</span>
                 </p>
               )}
             </DialogBody>
             <DialogFooter>
               <Button ref={cancelRef} variant="ghost" onClick={close} disabled={busy}>
-                Cancel
+                {t("Cancel")}
               </Button>
               {changed ? (
                 <Button variant="danger" onClick={trust} loading={busy}>
-                  {armed ? "Click again to trust" : "Trust new key"}
+                  {armed ? t("Click again to trust") : t("Trust new key")}
                 </Button>
               ) : (
                 <Button variant="primary" onClick={trust} loading={busy}>
-                  Trust and connect
+                  {t("Trust and connect")}
                 </Button>
               )}
             </DialogFooter>

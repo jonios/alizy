@@ -39,7 +39,7 @@ export function InfoRow({ label, children, className }: { label: ReactNode; chil
   return (
     <div className={cn("flex items-start justify-between gap-4 py-2 text-[13px]", className)}>
       <span className="shrink-0 text-muted">{label}</span>
-      <span className="min-w-0 text-right text-fg">{children}</span>
+      <span className="min-w-0 text-end text-fg">{children}</span>
     </div>
   );
 }

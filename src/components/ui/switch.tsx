@@ -22,8 +22,8 @@ export const Switch = forwardRef<
       className={cn(
         "pointer-events-none block rounded-full bg-white shadow-[0_1px_3px_rgb(0_0_0/0.3)] transition-transform duration-200 ease-out",
         size === "md"
-          ? "size-[18px] translate-x-[2px] data-[state=checked]:translate-x-[18px]"
-          : "size-[14px] translate-x-[2px] data-[state=checked]:translate-x-[14px]",
+          ? "size-[18px] translate-x-[2px] data-[state=checked]:translate-x-[18px] rtl:-translate-x-[2px] rtl:data-[state=checked]:-translate-x-[18px]"
+          : "size-[14px] translate-x-[2px] data-[state=checked]:translate-x-[14px] rtl:-translate-x-[2px] rtl:data-[state=checked]:-translate-x-[14px]",
       )}
     />
   </SwitchPrimitive.Root>

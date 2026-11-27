@@ -30,7 +30,7 @@ export function Select({ value, onValueChange, options, placeholder, disabled, c
         id={id}
         aria-label={rest["aria-label"]}
         className={cn(
-          "inline-flex items-center justify-between gap-2 rounded-lg border border-border bg-surface text-left text-sm text-fg",
+          "inline-flex items-center justify-between gap-2 rounded-lg border border-border bg-surface text-start text-sm text-fg",
           "transition-[border-color,box-shadow] duration-150 hover:border-border-strong",
           "focus:border-primary focus:outline-none focus:ring-3 focus:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-50",
           "data-[placeholder]:text-faint",
@@ -58,7 +58,7 @@ export function Select({ value, onValueChange, options, placeholder, disabled, c
                 value={o.value}
                 disabled={o.disabled}
                 className={cn(
-                  "relative flex cursor-pointer items-center rounded-md py-1.5 pr-8 pl-2.5 text-[13px] text-fg outline-none select-none",
+                  "relative flex cursor-pointer items-center rounded-md py-1.5 pe-8 ps-2.5 text-[13px] text-fg outline-none select-none",
                   "data-[highlighted]:bg-surface-2 data-[disabled]:cursor-not-allowed data-[disabled]:opacity-45",
                 )}
               >
@@ -66,7 +66,7 @@ export function Select({ value, onValueChange, options, placeholder, disabled, c
                   <SelectPrimitive.ItemText>{o.label}</SelectPrimitive.ItemText>
                   {o.description && <span className="text-xs text-muted">{o.description}</span>}
                 </div>
-                <SelectPrimitive.ItemIndicator className="absolute right-2.5 inline-flex items-center text-primary">
+                <SelectPrimitive.ItemIndicator className="absolute end-2.5 inline-flex items-center text-primary">
                   <Check className="size-4" />
                 </SelectPrimitive.ItemIndicator>
               </SelectPrimitive.Item>

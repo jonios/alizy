@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { Fragment, useEffect } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { EVENTS } from "./lib/api";
 import type { StatusEvent } from "./lib/types";
@@ -21,6 +21,7 @@ import { SplitTunneling } from "./screens/split/SplitTunneling";
 import { NetworkSettings } from "./screens/network/NetworkSettings";
 import { GeneralSettings } from "./screens/general/GeneralSettings";
 import { Logs } from "./screens/logs/Logs";
+import { setLang } from "./i18n";
 
 function useBackendWiring() {
   useEffect(() => {
@@ -72,9 +73,14 @@ export default function App() {
   useBackendWiring();
   useTheme();
   const screen = useNav((s) => s.screen);
+  const language = useSettings((s) => s.settings?.language ?? "en");
+  // Set before the tree renders so every t() call sees it; the key remounts
+  // the tree when the language (and with it the text direction) changes.
+  setLang(language);
 
   return (
     <TooltipProvider delayDuration={350} skipDelayDuration={150}>
+      <Fragment key={language}>
       <div className="flex h-full min-h-0 w-full bg-background text-fg">
         <Sidebar />
         {/* @container: screens size their grids against the space beside the sidebar, not the window. */}
@@ -87,6 +93,7 @@ export default function App() {
       <SshFlowDialogs />
       <DropOverlay />
       <Toaster />
+      </Fragment>
     </TooltipProvider>
   );
 }

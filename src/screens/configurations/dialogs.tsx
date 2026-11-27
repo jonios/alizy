@@ -11,6 +11,7 @@ import { toast } from "../../store/toast";
 import { useProfiles } from "../../store/profiles";
 import { useImportReport } from "../../store/importReport";
 import { ConfirmDialog } from "../../components/ui/dialog";
+import { t } from "../../i18n";
 
 const safeFileName = (name: string) => name.replace(/[^\w.-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 15) || "wg0";
 
@@ -41,7 +42,7 @@ export function RenameDialog({
     setBusy(true);
     try {
       await api.rename(id, trimmed);
-      toast.success("Profile renamed");
+      toast.success(t("Profile renamed"));
       void useProfiles.getState().load();
       onOpenChange(false);
     } catch (e) {
@@ -60,19 +61,19 @@ export function RenameDialog({
           }}
         >
           <DialogHeader>
-            <DialogTitle>Rename profile</DialogTitle>
+            <DialogTitle>{t("Rename profile")}</DialogTitle>
           </DialogHeader>
           <DialogBody>
-            <Field label="Name" htmlFor="rename-input" error={error} hint="Shown in the app and the tray menu.">
+            <Field label={t("Name")} htmlFor="rename-input" error={error} hint={t("Shown in the app and the tray menu.")}>
               <Input id="rename-input" value={name} onChange={(e) => setName(e.target.value)} autoFocus maxLength={64} invalid={!!error} />
             </Field>
           </DialogBody>
           <DialogFooter>
             <Button variant="ghost" onClick={() => onOpenChange(false)}>
-              Cancel
+              {t("Cancel")}
             </Button>
             <Button variant="primary" type="submit" loading={busy} disabled={!trimmed}>
-              Rename
+              {t("Rename")}
             </Button>
           </DialogFooter>
         </form>
@@ -102,22 +103,22 @@ export function ExportDialog({
     let path: string | null;
     try {
       path = await save({
-        title: "Export WireGuard configuration",
+        title: t("Export WireGuard configuration"),
         defaultPath: `${safeFileName(name)}.conf`,
         filters: [{ name: "WireGuard", extensions: ["conf"] }],
       });
     } catch (e) {
-      toast.error("Could not open the save dialog", e);
+      toast.error(t("Could not open the save dialog"), e);
       return;
     }
     if (!path) return;
     setBusy(true);
     try {
       await api.exportProfile(id, path, includePrivate);
-      toast.success("Configuration exported", path);
+      toast.success(t("Configuration exported"), path);
       onOpenChange(false);
     } catch (e) {
-      toast.error("Export failed", e);
+      toast.error(t("Export failed"), e);
     } finally {
       setBusy(false);
     }
@@ -126,8 +127,8 @@ export function ExportDialog({
     <Dialog open={open} onOpenChange={(o) => !busy && onOpenChange(o)}>
       <DialogContent size="sm">
         <DialogHeader>
-          <DialogTitle>Export “{name}”</DialogTitle>
-          <DialogDescription>Save this profile as a wg-quick compatible .conf file.</DialogDescription>
+          <DialogTitle>{t("Export “{name}”", { name })}</DialogTitle>
+          <DialogDescription>{t("Save this profile as a wg-quick compatible .conf file.")}</DialogDescription>
         </DialogHeader>
         <DialogBody className="flex flex-col gap-3">
           <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-border bg-surface-2/50 p-3.5 transition-colors hover:border-border-strong">
@@ -139,26 +140,29 @@ export function ExportDialog({
             />
             <div>
               <div className="flex items-center gap-1.5 text-[13px] font-medium text-fg">
-                <KeyRound className="size-3.5 text-muted" /> Include private key
+                <KeyRound className="size-3.5 text-muted" /> {t("Include private key")}
               </div>
               <div className="mt-0.5 text-xs leading-relaxed text-muted">
-                Without it, the file contains <code className="font-mono">PrivateKey = &lt;redacted&gt;</code> and can’t be used to connect
-                elsewhere.
+                {t("Without it, the file contains")}{" "}
+                <code className="font-mono" dir="ltr">
+                  PrivateKey = &lt;redacted&gt;
+                </code>{" "}
+                {t("and can’t be used to connect elsewhere.")}
               </div>
             </div>
           </label>
           {includePrivate && (
-            <Alert tone="warning" title="The exported file will contain your private key">
-              Anyone with this file can impersonate this device on the VPN. Store it securely and don’t share it.
+            <Alert tone="warning" title={t("The exported file will contain your private key")}>
+              {t("Anyone with this file can impersonate this device on the VPN. Store it securely and don’t share it.")}
             </Alert>
           )}
         </DialogBody>
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>
-            Cancel
+            {t("Cancel")}
           </Button>
           <Button variant="primary" onClick={run} loading={busy}>
-            Choose location…
+            {t("Choose location…")}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -186,17 +190,17 @@ export function DeleteProfileDialog({
       onOpenChange={onOpenChange}
       destructive
       icon={<TriangleAlert />}
-      title={`Delete “${name}”?`}
-      description="The profile and its stored private key will be permanently removed from this device. This cannot be undone."
-      confirmLabel="Delete profile"
+      title={t("Delete “{name}”?", { name })}
+      description={t("The profile and its stored private key will be permanently removed from this device. This cannot be undone.")}
+      confirmLabel={t("Delete profile")}
       onConfirm={async () => {
         try {
           await api.remove(id);
-          toast.success("Profile deleted", name);
+          toast.success(t("Profile deleted"), name);
           void useProfiles.getState().load();
           onDeleted?.();
         } catch (e) {
-          toast.error("Could not delete profile", e);
+          toast.error(t("Could not delete profile"), e);
           return false;
         }
       }}
@@ -211,27 +215,27 @@ export function BackupDialog({ open, onOpenChange }: { open: boolean; onOpenChan
       open={open}
       onOpenChange={onOpenChange}
       icon={<KeyRound />}
-      title="Back up all profiles"
-      description="The backup file contains every profile including its private key. Anyone who obtains it can use your VPN identities — keep it somewhere safe and encrypted."
-      confirmLabel="Choose location…"
+      title={t("Back up all profiles")}
+      description={t("The backup file contains every profile including its private key. Anyone who obtains it can use your VPN identities — keep it somewhere safe and encrypted.")}
+      confirmLabel={t("Choose location…")}
       onConfirm={async () => {
         let path: string | null;
         try {
           path = await save({
-            title: "Save Alizy backup",
+            title: t("Save Alizy backup"),
             defaultPath: `alizy-backup-${new Date().toISOString().slice(0, 10)}.json`,
-            filters: [{ name: "Alizy backup", extensions: ["json", "alizy"] }],
+            filters: [{ name: t("Alizy backup"), extensions: ["json", "alizy"] }],
           });
         } catch (e) {
-          toast.error("Could not open the save dialog", e);
+          toast.error(t("Could not open the save dialog"), e);
           return false;
         }
         if (!path) return false;
         try {
           const n = await api.backupExport(path);
-          toast.success(`Backed up ${n} profile${n === 1 ? "" : "s"}`, path);
+          toast.success(n === 1 ? t("Backed up {count} profile", { count: n }) : t("Backed up {count} profiles", { count: n }), path);
         } catch (e) {
-          toast.error("Backup failed", e);
+          toast.error(t("Backup failed"), e);
           return false;
         }
       }}
@@ -243,41 +247,41 @@ export async function restoreBackup() {
   let picked: string | string[] | null;
   try {
     picked = await openDialog({
-      title: "Restore Alizy backup",
+      title: t("Restore Alizy backup"),
       multiple: false,
-      filters: [{ name: "Alizy backup", extensions: ["json", "alizy"] }],
+      filters: [{ name: t("Alizy backup"), extensions: ["json", "alizy"] }],
     });
   } catch (e) {
-    toast.error("Could not open the file dialog", e);
+    toast.error(t("Could not open the file dialog"), e);
     return;
   }
   const path = Array.isArray(picked) ? picked[0] : picked;
   if (!path) return;
-  await useImportReport.getState().run(() => api.backupImport(path), "Backup restored");
+  await useImportReport.getState().run(() => api.backupImport(path), t("Backup restored"));
 }
 
 export async function importFiles() {
   let picked: string | string[] | null;
   try {
-    picked = await openDialog({ multiple: true, title: "Import WireGuard configurations", filters: [{ name: "WireGuard", extensions: ["conf"] }] });
+    picked = await openDialog({ multiple: true, title: t("Import WireGuard configurations"), filters: [{ name: "WireGuard", extensions: ["conf"] }] });
   } catch (e) {
-    toast.error("Could not open the file dialog", e);
+    toast.error(t("Could not open the file dialog"), e);
     return;
   }
   const paths = picked === null ? [] : Array.isArray(picked) ? picked : [picked];
   if (!paths.length) return;
-  await useImportReport.getState().run(() => api.importPaths(paths), "Import report");
+  await useImportReport.getState().run(() => api.importPaths(paths), t("Import report"));
 }
 
 export async function importFolder() {
   let picked: string | string[] | null;
   try {
-    picked = await openDialog({ directory: true, multiple: false, title: "Import every .conf in a folder" });
+    picked = await openDialog({ directory: true, multiple: false, title: t("Import every .conf in a folder") });
   } catch (e) {
-    toast.error("Could not open the folder dialog", e);
+    toast.error(t("Could not open the folder dialog"), e);
     return;
   }
   const path = Array.isArray(picked) ? picked[0] : picked;
   if (!path) return;
-  await useImportReport.getState().run(() => api.importPaths([path]), "Folder import report");
+  await useImportReport.getState().run(() => api.importPaths([path]), t("Folder import report"));
 }

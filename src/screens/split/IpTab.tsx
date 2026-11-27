@@ -3,6 +3,7 @@ import { useState } from "react";
 import { checkNet } from "../../lib/validate";
 import { AddRuleBar } from "./AddRuleBar";
 import { RuleListTab } from "./RuleListTab";
+import { t } from "../../i18n";
 
 export function IpTab() {
   const [value, setValue] = useState("");
@@ -12,13 +13,15 @@ export function IpTab() {
       kind="ip"
       addBar={
         <AddRuleBar
-          placeholder="192.0.2.10, 198.51.100.0/24 or 2001:db8::/32"
+          placeholder={t("{a}, {b} or {c}", { a: "192.0.2.10", b: "198.51.100.0/24", c: "2001:db8::/32" })}
           value={value}
           onValueChange={setValue}
           hint={
             c && c.ok
-              ? `IPv${c.family} ${c.normalized.includes("/") ? "range" : "address"} — ${c.normalized}`
-              : "Single addresses or CIDR ranges, IPv4 or IPv6."
+              ? c.normalized.includes("/")
+                ? t("IPv{family} range — {net}", { family: c.family, net: c.normalized })
+                : t("IPv{family} address — {net}", { family: c.family, net: c.normalized })
+              : t("Single addresses or CIDR ranges, IPv4 or IPv6.")
           }
           build={(raw) => {
             const r = checkNet(raw);
@@ -27,8 +30,8 @@ export function IpTab() {
         />
       }
       emptyIcon={<Binary />}
-      emptyTitle="No IP rules"
-      emptyDescription="IP and CIDR rules take precedence over domain rules. More specific ranges (longer prefixes) win over broader ones."
+      emptyTitle={t("No IP rules")}
+      emptyDescription={t("IP and CIDR rules take precedence over domain rules. More specific ranges (longer prefixes) win over broader ones.")}
     />
   );
 }

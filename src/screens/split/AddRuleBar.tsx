@@ -7,6 +7,7 @@ import { uuid } from "../../lib/utils";
 import { ActionToggle } from "./RuleRow";
 import { DEFAULT_PRIORITY, targetKey } from "./rules";
 import { useRules, useSplit } from "./store";
+import { t } from "../../i18n";
 
 /** Shared add-rule form. `build` returns either a target or an error message. */
 export function AddRuleBar({
@@ -32,7 +33,7 @@ export function AddRuleBar({
 
   const res = value.trim() ? build(value) : null;
   const dup = res && "target" in res && rules.some((r) => targetKey(r.target) === targetKey(res.target));
-  const error = res && "error" in res ? res.error : dup ? "A rule for this target already exists." : null;
+  const error = res && "error" in res ? res.error : dup ? t("A rule for this target already exists.") : null;
 
   const add = async () => {
     setTouched(true);
@@ -46,7 +47,7 @@ export function AddRuleBar({
           { id: uuid(), target: res.target, action, enabled: true, priority: DEFAULT_PRIORITY, category: category.trim() || null, note: null },
         ],
       }),
-      "Rule added",
+      t("Rule added"),
     );
     setBusy(false);
     if (ok) {
@@ -74,6 +75,7 @@ export function AddRuleBar({
             onBlur={() => value.trim() && setTouched(true)}
             placeholder={placeholder}
             className="font-mono text-[13px]"
+            dir="ltr"
             invalid={!!error && touched}
             aria-label={placeholder}
             spellCheck={false}
@@ -85,9 +87,9 @@ export function AddRuleBar({
         <div className="flex h-9 items-center">
           <ActionToggle value={action} onChange={setAction} size="md" />
         </div>
-        <Input value={category} onChange={(e) => setCategory(e.target.value)} placeholder="Category" className="w-36" maxLength={40} list="split-categories" aria-label="Category" />
+        <Input value={category} onChange={(e) => setCategory(e.target.value)} placeholder={t("Category")} className="w-36" maxLength={40} list="split-categories" aria-label={t("Category")} />
         <Button type="submit" variant="primary" loading={busy} disabled={!value.trim() || (!!error && touched)}>
-          {!busy && <Plus />} Add rule
+          {!busy && <Plus />} {t("Add rule")}
         </Button>
       </div>
       <div className="mt-2 min-h-4 text-xs">
