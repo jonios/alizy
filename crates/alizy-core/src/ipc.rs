@@ -4,6 +4,7 @@
 
 use crate::config::{PublicConfig, WgConfig};
 use crate::firewall::NetworkPolicy;
+use crate::protocol::TunnelConfig;
 use crate::ssh::{HostKey, SshConfig};
 use crate::state::ConnectionState;
 use serde::{Deserialize, Serialize};
@@ -13,17 +14,60 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const SOCKET_PATH: &str = "/run/alizy/alizyd.sock";
 pub const MAX_MESSAGE_BYTES: usize = 256 * 1024;
 
+/// A connect request: which profile, and its full protocol configuration.
+///
+/// On the wire it keeps the shape older GUIs and daemons speak (`config` +
+/// optional `ssh`), so a GUI and a daemon of different versions still agree.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "WireTunnelSpec", into = "WireTunnelSpec")]
 pub struct TunnelSpec {
     pub profile_id: String,
     pub profile_name: String,
-    pub config: WgConfig,
-    /// Last known resolved endpoint per peer (used when DNS is blocked).
-    #[serde(default)]
+    pub tunnel: TunnelConfig,
+    /// Last known resolved address per endpoint slot (used when DNS is blocked).
     pub cached_endpoints: Vec<Option<SocketAddr>>,
-    /// SSH-tunnel profile; when `Some`, `config` is ignored.
+}
+
+#[derive(Serialize, Deserialize)]
+struct WireTunnelSpec {
+    profile_id: String,
+    profile_name: String,
+    config: WgConfig,
+    #[serde(default)]
+    cached_endpoints: Vec<Option<SocketAddr>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ssh: Option<SshConfig>,
+    ssh: Option<SshConfig>,
+}
+
+impl From<WireTunnelSpec> for TunnelSpec {
+    fn from(w: WireTunnelSpec) -> Self {
+        let tunnel = match w.ssh {
+            Some(s) => TunnelConfig::Ssh(s),
+            None => TunnelConfig::WireGuard(w.config),
+        };
+        Self {
+            profile_id: w.profile_id,
+            profile_name: w.profile_name,
+            tunnel,
+            cached_endpoints: w.cached_endpoints,
+        }
+    }
+}
+
+impl From<TunnelSpec> for WireTunnelSpec {
+    fn from(s: TunnelSpec) -> Self {
+        let (config, ssh) = match s.tunnel {
+            TunnelConfig::WireGuard(c) => (c, None),
+            TunnelConfig::Ssh(c) => (WgConfig::placeholder(), Some(c)),
+        };
+        Self {
+            profile_id: s.profile_id,
+            profile_name: s.profile_name,
+            config,
+            cached_endpoints: s.cached_endpoints,
+            ssh,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,14 +174,97 @@ pub struct KillSwitchStatus {
 }
 
 /// LAN forward proxy configuration: devices on the local network (a smart
-/// TV, a console) reach the internet through this machine's tunnel. Phase A
-/// has no authentication — see LAN_PROXY.md.
+/// TV, a console) reach the internet through this machine's tunnel. Optional
+/// username/password authentication — see LAN_PROXY.md.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LanProxyConfig {
     pub enabled: bool,
     pub port: u16,
     #[serde(default = "default_socks_port")]
     pub socks_port: u16,
+    /// `None`: open to anyone on the network.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<ProxyAuth>,
+}
+
+/// Credentials for the LAN proxy. The GUI sends `password` only to set or
+/// change it; the daemon replaces it with a salted SHA-256 `verifier` before
+/// persisting, and never reports either back.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProxyAuth {
+    pub username: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<zeroize::Zeroizing<String>>,
+    /// `<salt hex>$<sha256(salt || password) hex>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verifier: Option<String>,
+}
+
+impl std::fmt::Debug for ProxyAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxyAuth")
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "[redacted]"))
+            .field("verifier", &self.verifier.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
+}
+
+/// Longest username/password RFC 1929 (SOCKS5 auth) can carry.
+pub const MAX_PROXY_CREDENTIAL: usize = 255;
+
+impl ProxyAuth {
+    pub fn validate_username(u: &str) -> Result<(), String> {
+        if u.is_empty() || u.len() > MAX_PROXY_CREDENTIAL {
+            return Err(format!("username must be 1-{MAX_PROXY_CREDENTIAL} bytes"));
+        }
+        if u.contains(':') || u.chars().any(|c| c.is_control() || c.is_whitespace()) {
+            return Err("username must not contain ':', spaces or control characters".into());
+        }
+        Ok(())
+    }
+
+    pub fn validate_password(p: &str) -> Result<(), String> {
+        if p.is_empty() || p.len() > MAX_PROXY_CREDENTIAL {
+            return Err(format!("password must be 1-{MAX_PROXY_CREDENTIAL} bytes"));
+        }
+        if p.chars().any(char::is_control) {
+            return Err("password must not contain control characters".into());
+        }
+        Ok(())
+    }
+
+    pub fn make_verifier(password: &str, salt: &[u8; 16]) -> String {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(salt);
+        h.update(password.as_bytes());
+        format!("{}${}", hex::encode(salt), hex::encode(h.finalize()))
+    }
+
+    /// Constant-time check of a client's credentials against the stored verifier.
+    pub fn check(&self, username: &[u8], password: &[u8]) -> bool {
+        use sha2::{Digest, Sha256};
+        let Some((salt, want)) = self.verifier.as_deref().and_then(|v| v.split_once('$')) else {
+            return false;
+        };
+        let (Ok(salt), Ok(want)) = (hex::decode(salt), hex::decode(want)) else {
+            return false;
+        };
+        let mut h = Sha256::new();
+        h.update(&salt);
+        h.update(password);
+        let got = h.finalize();
+        let user_ok = ct_eq(username, self.username.as_bytes());
+        ct_eq(&got, &want) & user_ok
+    }
+}
+
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 fn default_socks_port() -> u16 {
@@ -150,6 +277,7 @@ impl Default for LanProxyConfig {
             enabled: false,
             port: 8080,
             socks_port: 1080,
+            auth: None,
         }
     }
 }
@@ -164,6 +292,12 @@ impl LanProxyConfig {
         }
         if self.port == self.socks_port {
             return Err("HTTP and SOCKS5 ports must be different".into());
+        }
+        if let Some(a) = &self.auth {
+            ProxyAuth::validate_username(&a.username)?;
+            if let Some(p) = &a.password {
+                ProxyAuth::validate_password(p)?;
+            }
         }
         Ok(())
     }
@@ -193,6 +327,28 @@ pub struct LanProxyStatus {
     /// Whether the SOCKS5 listener is accepting connections right now.
     #[serde(default)]
     pub socks_listening: bool,
+    /// Username clients must log in with; absent when the proxy is open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_username: Option<String>,
+    /// SOCKS5 UDP ASSOCIATE is available (UDP relay on the SOCKS5 port).
+    #[serde(default)]
+    pub socks_udp: bool,
+}
+
+/// Proxy mode's local proxy on 127.0.0.1.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalProxyStatus {
+    /// Proxy mode is selected (the listeners should be up).
+    pub active: bool,
+    pub socks_port: u16,
+    pub http_port: u16,
+    pub socks_listening: bool,
+    pub http_listening: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// SOCKS5 UDP ASSOCIATE works with the current tunnel.
+    #[serde(default)]
+    pub udp: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -220,6 +376,9 @@ pub struct DaemonStatus {
     /// LAN forward proxy (share this machine's VPN with other devices).
     #[serde(default)]
     pub lan_proxy: LanProxyStatus,
+    /// Proxy mode's local SOCKS5/HTTP proxy.
+    #[serde(default)]
+    pub local_proxy: LocalProxyStatus,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -298,6 +457,7 @@ mod tests {
                 enabled: true,
                 port: 8080,
                 socks_port: 1080,
+                auth: None,
             },
         };
         let s = serde_json::to_string(&c).unwrap();
@@ -315,6 +475,30 @@ mod tests {
                 .command,
             Command::GetLanProxy
         ));
+    }
+
+    #[test]
+    fn proxy_auth_verifier_and_redaction() {
+        let mut a = ProxyAuth {
+            username: "tv".into(),
+            password: Some(zeroize::Zeroizing::new("s3cret".into())),
+            verifier: None,
+        };
+        assert!(!format!("{a:?}").contains("s3cret"));
+        a.verifier = Some(ProxyAuth::make_verifier("s3cret", &[7u8; 16]));
+        a.password = None;
+        assert!(a.check(b"tv", b"s3cret"));
+        assert!(!a.check(b"tv", b"s3cret!"));
+        assert!(!a.check(b"tV", b"s3cret"));
+        assert!(!ProxyAuth {
+            verifier: None,
+            ..a.clone()
+        }
+        .check(b"tv", b"s3cret"));
+        let j = serde_json::to_string(&a).unwrap();
+        assert!(!j.contains("s3cret") && !j.contains("password"));
+        assert!(ProxyAuth::validate_username("a:b").is_err());
+        assert!(ProxyAuth::validate_password(&"x".repeat(256)).is_err());
     }
 
     #[test]
@@ -392,9 +576,8 @@ mod ssh_ipc_tests {
         TunnelSpec {
             profile_id: "p1".into(),
             profile_name: "Home".into(),
-            config: cfg,
+            tunnel: TunnelConfig::WireGuard(cfg),
             cached_endpoints: vec![None],
-            ssh: None,
         }
     }
 
@@ -405,7 +588,21 @@ mod ssh_ipc_tests {
         };
         assert_eq!(serde_json::to_string(&c).unwrap(), GOLD_CONNECT);
         let back: Command = serde_json::from_str(GOLD_CONNECT).unwrap();
-        assert!(matches!(back, Command::Connect { spec } if spec.ssh.is_none()));
+        assert!(matches!(back, Command::Connect { spec } if matches!(spec.tunnel, TunnelConfig::WireGuard(_))));
+    }
+
+    /// What a pre-refactor GUI sends for an SSH profile, byte for byte.
+    const GOLD_SSH_CONNECT: &str = r#"{"cmd":"connect","spec":{"profile_id":"s1","profile_name":"Box","config":{"interface":{"private_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","addresses":[],"dns":[],"dns_search":[],"mtu":null,"listen_port":null},"peers":[]},"cached_endpoints":[],"ssh":{"public":{"host":"203.0.113.5","port":22,"username":"alice","host_key":null,"dns":[]},"password":"hunter2"}}}"#;
+
+    #[test]
+    fn ssh_connect_json_unchanged() {
+        let back: Command = serde_json::from_str(GOLD_SSH_CONNECT).unwrap();
+        let Command::Connect { spec } = &back else { panic!() };
+        let TunnelConfig::Ssh(ssh) = &spec.tunnel else {
+            panic!("decoded as {:?}", spec.tunnel.kind())
+        };
+        assert_eq!(ssh.public.username, "alice");
+        assert_eq!(serde_json::to_string(&back).unwrap(), GOLD_SSH_CONNECT);
     }
 
     #[test]
@@ -419,8 +616,7 @@ mod ssh_ipc_tests {
     #[test]
     fn ssh_spec_roundtrips() {
         let mut spec = wg_spec();
-        spec.config = crate::config::WgConfig::placeholder();
-        spec.ssh = Some(SshConfig {
+        spec.tunnel = TunnelConfig::Ssh(SshConfig {
             public: SshPublic {
                 host: "203.0.113.5".parse().unwrap(),
                 port: 22,
@@ -433,7 +629,7 @@ mod ssh_ipc_tests {
         let s = serde_json::to_string(&Command::Connect { spec: Box::new(spec) }).unwrap();
         let back: Command = serde_json::from_str(&s).unwrap();
         let Command::Connect { spec } = back else { panic!() };
-        let ssh = spec.ssh.unwrap();
+        let TunnelConfig::Ssh(ssh) = spec.tunnel else { panic!() };
         assert_eq!(ssh.public.username, "alice");
         assert_eq!(&*ssh.password, "hunter2");
         assert!(!format!("{ssh:?}").contains("hunter2"));

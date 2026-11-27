@@ -19,7 +19,7 @@ use crate::cancel::CancelToken;
 use crate::exec::{argv, run};
 use crate::socks_dns::{socks5_greeting, DnsForwarder};
 use alizy_core::ipc::{ErrorCode, TunnelStats};
-use alizy_core::routing::{DnsPlan, RoutePlan, SSH_DNS_FORWARDER, SSH_NETIF_V4, SSH_NETIF_V6};
+use alizy_core::routing::{SSH_DNS_FORWARDER, SSH_NETIF_V4, SSH_NETIF_V6};
 use alizy_core::ssh::{HostKey, SshConfig, SshPublic};
 use alizy_core::sysprobe::{find_exe, SAFE_PATH};
 use std::collections::VecDeque;
@@ -124,8 +124,6 @@ pub struct SshUp<'a> {
     pub socks_port: u16,
     pub upstreams: Vec<IpAddr>,
     pub ipv6: bool,
-    pub routes: &'a RoutePlan,
-    pub dns: &'a DnsPlan,
     /// Bumped by the engine (without its lock) when the user disconnects.
     pub cancel: CancelToken,
 }
@@ -492,7 +490,7 @@ pub struct SshTunnel {
 
 /// Bring the SSH side up on an existing (empty) firewall plan for it:
 /// known_hosts → TUN owned by alizy-ssh → askpass → ssh → SOCKS readiness →
-/// tun2socks → DNS forwarder. Routes and system DNS are the adapter's job.
+/// tun2socks → DNS forwarder. Routes and system DNS are the engine's job.
 /// On error every child started here is killed (kill_on_drop) and the
 /// known_hosts file removed; the TUN is removed by the caller's teardown.
 pub async fn start(req: &SshUp<'_>) -> Result<SshTunnel, SshError> {

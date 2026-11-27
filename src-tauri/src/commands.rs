@@ -9,6 +9,7 @@ use alizy_core::ipc::ErrorCode;
 use alizy_core::ipc::{
     Command, DaemonStatus, LanProxyConfig, LanProxyStatus, Payload, RouteTest, SplitStatus, TunnelSpec,
 };
+use alizy_core::protocol::TunnelConfig;
 use alizy_core::routing::compatibility_warnings;
 use alizy_core::split::{import_rules, Action, ImportResult, SplitConfig};
 use alizy_core::ssh::{HostKey, SshPublic};
@@ -675,28 +676,21 @@ pub async fn connect_profile(st: &AppState, id: &str) -> Result<(), ConnectError
         .get_profile(id)
         .await
         .map_err(|err| ConnectError::new("other", err.to_string()))?;
-    let spec = if row.kind == ProfileKind::Ssh {
-        let ssh = st.profiles.full_ssh_config(id).await?;
-        TunnelSpec {
-            profile_id: row.id.clone(),
-            profile_name: row.name.clone(),
-            config: alizy_core::WgConfig::placeholder(),
-            cached_endpoints: vec![],
-            ssh: Some(ssh),
-        }
+    let (tunnel, cached_endpoints) = if row.kind == ProfileKind::Ssh {
+        (TunnelConfig::Ssh(st.profiles.full_ssh_config(id).await?), vec![])
     } else {
         let config = st
             .profiles
             .full_config(id)
             .await
             .map_err(|err| ConnectError::new("other", err.to_string()))?;
-        TunnelSpec {
-            profile_id: row.id.clone(),
-            profile_name: row.name.clone(),
-            config,
-            cached_endpoints: row.cached_endpoints.clone(),
-            ssh: None,
-        }
+        (TunnelConfig::WireGuard(config), row.cached_endpoints.clone())
+    };
+    let spec = TunnelSpec {
+        profile_id: row.id.clone(),
+        profile_name: row.name.clone(),
+        tunnel,
+        cached_endpoints,
     };
     st.log("info", "connection", format!("Connecting to \"{}\"…", row.name))
         .await;

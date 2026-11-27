@@ -88,6 +88,7 @@ mod tests {
                 enabled: true,
                 port: 9090,
                 socks_port: 1080,
+                auth: None,
             },
             ..Default::default()
         };

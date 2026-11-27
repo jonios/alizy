@@ -1,23 +1,27 @@
-//! LAN forward proxy: devices on the local network (a smart TV, a console)
-//! reach the internet through this machine's VPN connection.
+//! HTTP forward proxy, used for LAN sharing (devices on the local network
+//! reach the internet through this machine's VPN) and for proxy mode's local
+//! proxy on 127.0.0.1.
 //!
 //! HTTP `CONNECT` tunnels TLS; absolute-form requests are forwarded for
-//! plain HTTP, one request per connection (`Connection: close`). There is
-//! deliberately no authentication in this phase: the listener is bound to
-//! every interface and anyone who can reach it can use the tunnel — the UI
-//! and LAN_PROXY.md say so in plain words.
+//! plain HTTP, one request per connection (`Connection: close`). With
+//! credentials configured, clients must send `Proxy-Authorization: Basic`
+//! (answered with 407 otherwise); Basic sends them in clear text on the LAN,
+//! which LAN_PROXY.md states.
 //!
-//! Outbound connections are ordinary sockets, so while a tunnel is up the
-//! daemon's policy routing carries them through it and a client of this
-//! proxy sees the VPN's exit address. Destination names are resolved by the
-//! system resolver, which the daemon points at the tunnel while connected,
-//! so a lookup never leaves the tunnel either.
+//! Outbound connections go through the current [`Egress`](crate::egress::Egress):
+//! in tunnel mode ordinary sockets (policy routing carries them through the
+//! tunnel, and names are resolved by the system resolver the daemon points
+//! at the tunnel); in proxy mode marked sockets or the SSH SOCKS proxy.
 
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::egress;
+use crate::lan_socks::ServeOpts;
+use alizy_core::ipc::ProxyAuth;
+use base64::Engine as _;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
@@ -31,8 +35,6 @@ const MAX_CLIENTS: usize = 64;
 const HEADER_TIMEOUT: Duration = Duration::from_secs(30);
 /// Request headers are capped; nothing larger is buffered from the network.
 const MAX_HEADER: usize = 16 * 1024;
-/// Name resolution and connect budget for one destination.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// A relay with no bytes in either direction for this long is closed.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// Relay buffer size.
@@ -48,12 +50,12 @@ pub struct LanProxy {
 }
 
 impl LanProxy {
-    /// Listen on `0.0.0.0:port` and serve HTTP-proxy clients. Port 0 asks
+    /// Listen on `bind:port` and serve HTTP-proxy clients. Port 0 asks
     /// the kernel for an ephemeral port (tests); user-supplied ports are
-    /// validated by `LanProxyConfig::validate`. Bind failures come back as
-    /// messages a user can act on.
-    pub async fn start(port: u16) -> io::Result<LanProxy> {
-        let listener = TcpListener::bind(("0.0.0.0", port))
+    /// validated by the IPC layer. Bind failures come back as messages a
+    /// user can act on.
+    pub async fn start(bind: IpAddr, port: u16, opts: ServeOpts) -> io::Result<LanProxy> {
+        let listener = TcpListener::bind((bind, port))
             .await
             .map_err(|e| bind_error(&e, port))?;
         let local = listener.local_addr()?;
@@ -89,9 +91,10 @@ impl LanProxy {
                     drop(stream);
                     continue;
                 };
+                let opts = opts.clone();
                 clients.spawn(async move {
                     let _permit = permit;
-                    if let Err(e) = serve(stream).await {
+                    if let Err(e) = serve(stream, &opts).await {
                         debug!(%peer, "lan proxy client: {e}");
                     }
                 });
@@ -103,7 +106,7 @@ impl LanProxy {
         })
     }
 
-    /// The address the listener is bound to (`0.0.0.0:<port>`).
+    /// The address the listener is bound to.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn local_addr(&self) -> SocketAddr {
         self.local
@@ -139,7 +142,7 @@ fn bind_error(e: &io::Error, port: u16) -> io::Error {
 
 /// Serve one client connection: read the request, pick the destination,
 /// connect, then relay until either side goes away.
-async fn serve(mut client: TcpStream) -> io::Result<()> {
+async fn serve(mut client: TcpStream, opts: &ServeOpts) -> io::Result<()> {
     let mut buf = Vec::with_capacity(1024);
     let head_end = loop {
         if let Some(p) = header_end(&buf) {
@@ -175,12 +178,18 @@ async fn serve(mut client: TcpStream) -> io::Result<()> {
     if !version.starts_with("HTTP/") {
         return reply(&mut client, "400 Bad Request", "not an HTTP request").await;
     }
+    if let Some(auth) = &opts.auth {
+        if !authorized(&head, auth) {
+            return reply_407(&mut client).await;
+        }
+    }
+    let egress = opts.egress.get();
 
     if method.eq_ignore_ascii_case("CONNECT") {
         let Some((host, port)) = authority(target, None) else {
             return reply(&mut client, "400 Bad Request", "invalid CONNECT target").await;
         };
-        let mut upstream = match connect(&host, port).await {
+        let mut upstream = match egress::connect_tcp(&egress, &host, port).await {
             Ok(s) => s,
             Err(e) => return reply(&mut client, "502 Bad Gateway", &e.to_string()).await,
         };
@@ -233,7 +242,7 @@ async fn serve(mut client: TcpStream) -> io::Result<()> {
     }
     out.extend_from_slice(b"Connection: close\r\n\r\n");
 
-    let mut upstream = match connect(&host, port).await {
+    let mut upstream = match egress::connect_tcp(&egress, &host, port).await {
         Ok(s) => s,
         Err(e) => return reply(&mut client, "502 Bad Gateway", &e.to_string()).await,
     };
@@ -276,21 +285,41 @@ fn authority(s: &str, default_port: Option<u16>) -> Option<(String, u16)> {
     }
 }
 
-/// Resolve `host` and connect, trying every address, within one budget.
-async fn connect(host: &str, port: u16) -> io::Result<TcpStream> {
-    let addrs = timeout(CONNECT_TIMEOUT, tokio::net::lookup_host((host, port)))
-        .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "name resolution timed out"))?
-        .map_err(|e| io::Error::other(format!("cannot resolve {host}: {e}")))?;
-    let mut last = None;
-    for addr in addrs {
-        match timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await {
-            Ok(Ok(s)) => return Ok(s),
-            Ok(Err(e)) => last = Some(e),
-            Err(_) => return Err(io::Error::new(io::ErrorKind::TimedOut, "connect timed out")),
+/// `Proxy-Authorization: Basic base64(user:password)` matching the credentials.
+fn authorized(head: &str, auth: &ProxyAuth) -> bool {
+    head.lines().skip(1).any(|h| {
+        let Some((name, value)) = h.split_once(':') else {
+            return false;
+        };
+        if !name.trim().eq_ignore_ascii_case("proxy-authorization") {
+            return false;
         }
-    }
-    Err(last.unwrap_or_else(|| io::Error::other(format!("no address for {host}"))))
+        let mut v = value.trim().splitn(2, ' ');
+        let (Some(scheme), Some(token)) = (v.next(), v.next()) else {
+            return false;
+        };
+        if !scheme.eq_ignore_ascii_case("basic") {
+            return false;
+        }
+        let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(token.trim()) else {
+            return false;
+        };
+        let raw = zeroize::Zeroizing::new(raw);
+        let Some(i) = raw.iter().position(|b| *b == b':') else {
+            return false;
+        };
+        auth.check(&raw[..i], &raw[i + 1..])
+    })
+}
+
+async fn reply_407(s: &mut TcpStream) -> io::Result<()> {
+    let body = "407 Proxy Authentication Required\n";
+    let msg = format!(
+        "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"Alizy\"\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    s.write_all(msg.as_bytes()).await?;
+    s.shutdown().await
 }
 
 async fn reply(s: &mut TcpStream, status: &str, detail: &str) -> io::Result<()> {
@@ -378,6 +407,52 @@ mod tests {
     use super::*;
     use std::sync::Mutex as StdMutex;
 
+    fn any() -> IpAddr {
+        "0.0.0.0".parse().unwrap()
+    }
+
+    #[tokio::test]
+    async fn credentials_are_required_when_configured() {
+        let target = echo().await;
+        let opts = ServeOpts {
+            auth: Some(Arc::new(ProxyAuth {
+                username: "tv".into(),
+                password: None,
+                verifier: Some(ProxyAuth::make_verifier("pw", &[2u8; 16])),
+            })),
+            ..Default::default()
+        };
+        let p = LanProxy::start(any(), 0, opts).await.unwrap();
+        let ask = |auth: Option<&str>| {
+            let addr = p.local_addr();
+            let auth = auth.map(String::from);
+            async move {
+                let mut c = TcpStream::connect(addr).await.unwrap();
+                let hdr = auth
+                    .map(|a| {
+                        format!(
+                            "Proxy-Authorization: Basic {}\r\n",
+                            base64::engine::general_purpose::STANDARD.encode(a)
+                        )
+                    })
+                    .unwrap_or_default();
+                c.write_all(format!("CONNECT {target} HTTP/1.1\r\n{hdr}\r\n").as_bytes())
+                    .await
+                    .unwrap();
+                let mut buf = vec![0u8; 256];
+                let n = c.read(&mut buf).await.unwrap();
+                String::from_utf8_lossy(&buf[..n]).into_owned()
+            }
+        };
+        let r = ask(None).await;
+        assert!(
+            r.starts_with("HTTP/1.1 407") && r.contains("Proxy-Authenticate: Basic"),
+            "{r}"
+        );
+        assert!(ask(Some("tv:wrong")).await.starts_with("HTTP/1.1 407"));
+        assert!(ask(Some("tv:pw")).await.starts_with("HTTP/1.1 200"));
+    }
+
     /// Echo server: returns everything it receives.
     async fn echo() -> SocketAddr {
         let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -441,7 +516,7 @@ mod tests {
     #[tokio::test]
     async fn connect_tunnels_raw_bytes_to_the_target() {
         let target = echo().await;
-        let p = LanProxy::start(0).await.unwrap();
+        let p = LanProxy::start(any(), 0, ServeOpts::default()).await.unwrap();
         let mut c = TcpStream::connect(p.local_addr()).await.unwrap();
         c.write_all(format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").as_bytes())
             .await
@@ -464,7 +539,7 @@ mod tests {
     #[tokio::test]
     async fn plain_http_request_is_forwarded_in_origin_form() {
         let (target, seen) = http_server().await;
-        let p = LanProxy::start(0).await.unwrap();
+        let p = LanProxy::start(any(), 0, ServeOpts::default()).await.unwrap();
         let mut c = TcpStream::connect(p.local_addr()).await.unwrap();
         c.write_all(
             format!("GET http://{target}/x?a=1 HTTP/1.1\r\nHost: {target}\r\nProxy-Connection: keep-alive\r\nCookie: k=v\r\n\r\n")
@@ -486,7 +561,7 @@ mod tests {
 
     #[tokio::test]
     async fn https_urls_get_a_clear_400() {
-        let p = LanProxy::start(0).await.unwrap();
+        let p = LanProxy::start(any(), 0, ServeOpts::default()).await.unwrap();
         let mut c = TcpStream::connect(p.local_addr()).await.unwrap();
         c.write_all(b"GET https://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n")
             .await
@@ -498,7 +573,7 @@ mod tests {
 
     #[tokio::test]
     async fn non_http_input_gets_a_400() {
-        let p = LanProxy::start(0).await.unwrap();
+        let p = LanProxy::start(any(), 0, ServeOpts::default()).await.unwrap();
         let mut c = TcpStream::connect(p.local_addr()).await.unwrap();
         c.write_all(b"this is not http\r\n\r\n").await.unwrap();
         let resp = read_all(&mut c).await;
@@ -511,7 +586,7 @@ mod tests {
         let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let target = l.local_addr().unwrap();
         drop(l);
-        let p = LanProxy::start(0).await.unwrap();
+        let p = LanProxy::start(any(), 0, ServeOpts::default()).await.unwrap();
         let mut c = TcpStream::connect(p.local_addr()).await.unwrap();
         c.write_all(format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").as_bytes())
             .await
@@ -522,7 +597,7 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_headers_are_refused() {
-        let p = LanProxy::start(0).await.unwrap();
+        let p = LanProxy::start(any(), 0, ServeOpts::default()).await.unwrap();
         let mut c = TcpStream::connect(p.local_addr()).await.unwrap();
         c.write_all(&vec![b'a'; MAX_HEADER + 4096]).await.unwrap();
         let resp = read_all(&mut c).await;
@@ -534,10 +609,10 @@ mod tests {
         // Parallel tests' client sockets can take the freed ephemeral port
         // before the rebind; only that race is retried, with a fresh port.
         for _ in 0..5 {
-            let p = LanProxy::start(0).await.unwrap();
+            let p = LanProxy::start(any(), 0, ServeOpts::default()).await.unwrap();
             let port = p.local_addr().port();
             p.stop().await;
-            match LanProxy::start(port).await {
+            match LanProxy::start(any(), port, ServeOpts::default()).await {
                 Ok(again) => return assert_eq!(again.local_addr().port(), port),
                 Err(e) if e.to_string().contains("already in use") => continue,
                 Err(e) => panic!("{e}"),
@@ -550,7 +625,7 @@ mod tests {
     async fn bind_conflict_has_a_clear_message() {
         let l = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
         let port = l.local_addr().unwrap().port();
-        let Err(e) = LanProxy::start(port).await else {
+        let Err(e) = LanProxy::start(any(), port, ServeOpts::default()).await else {
             panic!("binding a port already in use must fail");
         };
         assert!(e.to_string().contains("already in use"), "{e}");

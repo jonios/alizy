@@ -77,6 +77,25 @@ before the desktop baseline was installed: `libEGL.so.1`, `libgbm.so.1`,
 `libwayland-client.so.0`, `libharfbuzz.so.0`, `libfribidi.so.0` (varies by image). These
 are excluded from AppImages on purpose and present on desktop installations.
 
+## Proxy mode and VPN sharing: `tests/proxy/e2e.py`
+
+Runs inside the isolated screenshot environment (`tests/screenshots/shoot.sh start`:
+no host network, real `alizyd`, real WireGuard server in a separate namespace):
+
+```bash
+podman cp tests/proxy/e2e.py alizy-shots:/tmp/e2e.py && podman exec alizy-shots python3 /tmp/e2e.py
+```
+
+34 checks, all passing (2026-11-27), with strict `rp_filter=1`: tunnel mode
+unchanged; proxy mode leaves system routes and DNS alone while SOCKS5 (IP and
+names through the tunnel's DNS), SOCKS5 UDP and the HTTP proxy go through the
+tunnel; the proxy guard is installed and there is no kill-switch rule; with the
+VPN down the proxy refuses (SOCKS reply 2) and the normal connection works;
+switching back restores the kill switch and stops the local proxy; VPN sharing
+refuses missing or wrong logins, accepts the right one over SOCKS5 (TCP and UDP,
+kill switch on, LAN otherwise blocked) and HTTP (407 without login), and never
+stores the password.
+
 ## Real machine: Omarchy (Arch), Hyprland, systemd-resolved, ufw, Wi-Fi
 
 `tests/system/70-installer-migration.sh`, run on the maintainer's machine, which had the

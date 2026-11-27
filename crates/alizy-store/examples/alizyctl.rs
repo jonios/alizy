@@ -157,9 +157,8 @@ async fn main() {
                 let spec = TunnelSpec {
                     profile_id: row.id,
                     profile_name: row.name,
-                    config,
+                    tunnel: alizy_core::TunnelConfig::WireGuard(config),
                     cached_endpoints: row.cached_endpoints,
-                    ssh: None,
                 };
                 print(&call(Command::Connect { spec: Box::new(spec) }).await?);
                 Ok(())
@@ -188,9 +187,8 @@ async fn main() {
                 let spec = TunnelSpec {
                     profile_id: "ssh-test".into(),
                     profile_name: "SSH test".into(),
-                    config: alizy_core::config::WgConfig::placeholder(),
+                    tunnel: alizy_core::TunnelConfig::Ssh(alizy_core::ssh::SshConfig { public, password }),
                     cached_endpoints: Vec::new(),
-                    ssh: Some(alizy_core::ssh::SshConfig { public, password }),
                 };
                 let raw = call_raw(Command::Connect { spec: Box::new(spec) }).await?;
                 println!("{raw}");

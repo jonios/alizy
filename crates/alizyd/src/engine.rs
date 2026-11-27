@@ -5,35 +5,34 @@
 //! verification. The engine never removes blocking rules to perform an update.
 
 use crate::cancel::{CancelSource, CancelToken};
+use crate::driver::{Ctx, Session, TunnelDriver, UpError};
+use crate::egress::{Egress, EgressHandle};
 use crate::events::Events;
 use crate::lan_proxy::LanProxy;
-use crate::lan_socks::LanSocks;
-use crate::linux::ssh::{self as sshb, SshError, SshUp};
+use crate::lan_socks::{LanSocks, ServeOpts};
 use crate::linux::{firewall, LinuxAdapter};
 use crate::persist::{Persist, PersistedState};
 use crate::resolver::{now, Resolver};
 use alizy_core::config::{Host, PublicConfig};
-use alizy_core::firewall::{FirewallPlan, NetworkPolicy, TunnelRules, SPLIT_MARK};
+use alizy_core::firewall::{ConnectionMode, FirewallPlan, NetworkPolicy, SPLIT_MARK};
 use alizy_core::ipc::{
     DaemonStatus, ErrorCode, EventCategory as Cat, EventLevel as Lvl, IpcError, KillSwitchStatus, LanProxyConfig,
-    LanProxyStatus, RouteTest, RouteTestEntry, SplitStatus, TunnelSpec, TunnelStats,
+    LanProxyStatus, LocalProxyStatus, ProxyAuth, RouteTest, RouteTestEntry, SplitStatus, TunnelSpec, TunnelStats,
 };
 use alizy_core::platform::PlatformAdapter;
-use alizy_core::routing::{
-    compatibility_warnings, dns_plan, route_plan, ssh_dns_plan, ssh_public_config, ssh_upstream_plan, DnsPlan,
-};
+use alizy_core::protocol::ProtocolKind;
+use alizy_core::routing::{compatibility_warnings, route_plan, DnsPlan};
 use alizy_core::split::{self, Action, SplitConfig, MAX_RULES};
-use alizy_core::ssh::{HostKey, SshConfig};
 use alizy_core::state::{transition, ConnectionState, Event};
-use alizy_core::sysprobe::{Dependency, DnsBackend};
+use alizy_core::sysprobe::DnsBackend;
 use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{watch, Mutex};
 
 /// Everything the engine needs from the OS beyond [`PlatformAdapter`]. The
 /// engine is generic over it (production: [`LinuxAdapter`]) so the connection
-/// state machine can be exercised without root.
+/// state machine can be exercised without root. Protocol-specific operations
+/// live in [`TunnelDriver`]s, not here.
 #[allow(async_fn_in_trait)]
 pub trait Backend: PlatformAdapter {
     fn dns_backend(&self) -> Option<DnsBackend>;
@@ -42,104 +41,25 @@ pub trait Backend: PlatformAdapter {
     fn restore_dns_backup(&self) -> Result<(), String>;
     /// Whether the tunnel interface exists in the daemon's network namespace.
     fn iface_exists(&self, iface: &str) -> bool;
-    /// Point one WireGuard peer at a new endpoint.
-    async fn set_endpoint(&self, iface: &str, peer: &str, ep: SocketAddr) -> Result<(), String>;
     /// Install (`want`) or remove the split-tunnel routing rule; returns the errors.
     async fn set_split_rule(&self, want: bool) -> Vec<String>;
-    /// Bring an SSH tunnel up (tearing down any previous tunnel first).
-    async fn ssh_up(&self, req: SshUp<'_>) -> Result<(), SshError>;
-    /// `Some(reason)` once a running SSH tunnel's ssh or tun2socks has exited.
-    async fn ssh_try_exited(&self) -> Option<String>;
-    /// Fetch a server's host key, running as `user` (never root). Gives up
-    /// promptly once `cancel` fires.
-    async fn keyscan(&self, user: (u32, u32), host: IpAddr, port: u16, cancel: &CancelToken)
-        -> Result<HostKey, String>;
-    /// Missing SSH dependencies; empty when ready. Any version probe runs as
-    /// `user`, never root, with a timeout.
-    async fn ssh_missing(&self, user: (u32, u32)) -> Vec<Dependency>;
 }
 
-/// Where and as whom SSH tunnels run.
-pub struct SshEnv {
-    /// (uid, primary gid) of `alizy-ssh`; `None` disables SSH tunnels.
-    pub user: Option<(u32, u32)>,
-    /// Runtime directory for known_hosts files and askpass sockets.
-    pub runtime: PathBuf,
-}
-
-const MISSING_SSH_USER: &str = "alizy-ssh system user missing; SSH tunnels are unavailable (reinstall Alizy)";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TunnelKind {
-    WireGuard,
-    Ssh,
-}
-
+/// The tunnel that is up (or being brought up).
 struct Active {
+    kind: ProtocolKind,
     public: PublicConfig,
+    /// System DNS for the tunnel; `None` in proxy mode (system DNS untouched).
+    dns: Option<DnsPlan>,
+    /// Resolved addresses, one slot per `TunnelConfig::endpoints` entry.
     endpoints: Vec<Option<SocketAddr>>,
+    session: Session,
     since: u64,
     stats: Option<TunnelStats>,
-    kind: TunnelKind,
-    /// `ssh -D` port (SSH only).
-    socks_port: Option<u16>,
-}
-
-/// Why a bring-up failed, with the IPC error code to report.
-#[derive(Debug)]
-struct UpError {
-    code: ErrorCode,
-    msg: String,
-    host_key: Option<HostKey>,
-}
-
-impl From<String> for UpError {
-    fn from(msg: String) -> Self {
-        Self {
-            code: ErrorCode::Tunnel,
-            msg,
-            host_key: None,
-        }
-    }
-}
-
-impl From<SshError> for UpError {
-    fn from(e: SshError) -> Self {
-        Self {
-            code: e.code(),
-            msg: e.to_string(),
-            host_key: e.host_key(),
-        }
-    }
-}
-
-impl UpError {
-    fn into_ipc(self) -> IpcError {
-        let mut e = IpcError::new(self.code, self.msg);
-        e.host_key = self.host_key;
-        e
-    }
-}
-
-/// Firewall exceptions for the active tunnel. WireGuard: its UDP endpoints
-/// only (exactly as before SSH support). SSH: the server's TCP endpoint,
-/// alizy-ssh's uid, the SOCKS port and the UDP block.
-fn tunnel_rules(iface: &str, a: &Active, ssh_uid: Option<u32>) -> TunnelRules {
-    match a.kind {
-        TunnelKind::WireGuard => TunnelRules {
-            iface: iface.to_string(),
-            endpoints: a.endpoints.iter().flatten().copied().collect(),
-            ..Default::default()
-        },
-        TunnelKind::Ssh => TunnelRules {
-            iface: iface.to_string(),
-            tcp_endpoints: a.endpoints.iter().flatten().copied().collect(),
-            ssh_uid,
-            socks_port: a.socks_port,
-            block_udp: true,
-            ..Default::default()
-        },
-    }
+    /// How the local proxy reaches the internet through this tunnel (proxy mode).
+    proxy_egress: Egress,
+    /// The tunnel carries UDP.
+    udp: bool,
 }
 
 struct Inner {
@@ -156,6 +76,8 @@ struct Inner {
     next_reconnect: u64,
     /// Published LAN proxy state (config, addresses, start errors).
     lan: LanProxyStatus,
+    /// Published state of proxy mode's local proxy.
+    local: LocalProxyStatus,
 }
 
 pub struct Engine<A = LinuxAdapter> {
@@ -165,7 +87,8 @@ pub struct Engine<A = LinuxAdapter> {
     report_cache: Mutex<Option<(std::time::Instant, alizy_core::sysprobe::SystemReport)>>,
     route_tests: tokio::sync::Semaphore,
     adapter: A,
-    ssh: SshEnv,
+    /// Registered protocol drivers; the engine never names a concrete one.
+    drivers: Vec<Box<dyn TunnelDriver>>,
     /// Cancels an in-progress bring-up. Deliberately outside `inner`:
     /// `disconnect`/`connect` bump it *before* waiting for the lock.
     cancel: CancelSource,
@@ -175,6 +98,11 @@ pub struct Engine<A = LinuxAdapter> {
     lan: Mutex<Option<LanProxy>>,
     /// The SOCKS5 LAN proxy listener.
     lan_socks: Mutex<Option<LanSocks>>,
+    /// Proxy mode's listeners on 127.0.0.1 (same lock order rule as `lan`).
+    local_http: Mutex<Option<LanProxy>>,
+    local_socks: Mutex<Option<LanSocks>>,
+    /// Where every proxy's connections go; follows mode and tunnel state.
+    egress: EgressHandle,
     pub events: Events,
     persist: Persist,
     resolver: Resolver,
@@ -187,9 +115,15 @@ fn err(code: ErrorCode, m: impl Into<String>) -> IpcError {
 }
 
 impl<A: Backend> Engine<A> {
-    pub async fn start(adapter: A, persist: Persist, resolver: Resolver, iface: String, ssh: SshEnv) -> Arc<Self> {
+    pub async fn start(
+        adapter: A,
+        drivers: Vec<Box<dyn TunnelDriver>>,
+        persist: Persist,
+        resolver: Resolver,
+        iface: String,
+    ) -> Arc<Self> {
         let persisted = persist.load();
-        let ks = persisted.policy.kill_switch;
+        let ks = persisted.policy.kill_switch_active();
         let initial = DaemonStatus {
             state: ConnectionState::Disconnected,
             profile_id: None,
@@ -212,6 +146,7 @@ impl<A: Backend> Engine<A> {
             daemon_started: now(),
             tunnel_kind: None,
             lan_proxy: LanProxyStatus::default(),
+            local_proxy: LocalProxyStatus::default(),
         };
         let (status_tx, _) = watch::channel(initial);
         let engine = Arc::new(Self {
@@ -220,7 +155,7 @@ impl<A: Backend> Engine<A> {
             report_cache: Mutex::new(None),
             route_tests: tokio::sync::Semaphore::new(2),
             adapter,
-            ssh,
+            drivers,
             cancel: CancelSource::default(),
             inner: Mutex::new(Inner {
                 state: ConnectionState::Disconnected,
@@ -234,10 +169,14 @@ impl<A: Backend> Engine<A> {
                 reconnect_attempt: 0,
                 next_reconnect: 0,
                 lan: LanProxyStatus::default(),
+                local: LocalProxyStatus::default(),
             }),
             events: Events::default(),
             lan: Mutex::new(None),
             lan_socks: Mutex::new(None),
+            local_http: Mutex::new(None),
+            local_socks: Mutex::new(None),
+            egress: EgressHandle::default(),
             persist,
             resolver,
             iface,
@@ -248,7 +187,9 @@ impl<A: Backend> Engine<A> {
         // enforced it); now open the listener it belongs to.
         {
             let mut inner = engine.inner.lock().await;
+            engine.publish(&inner);
             engine.apply_lan(&mut inner).await;
+            engine.apply_local(&mut inner).await;
             engine.publish(&inner);
         }
         engine
@@ -267,7 +208,7 @@ impl<A: Backend> Engine<A> {
                 ),
             );
         }
-        if let Err(e) = self.adapter.tunnel_down(&self.iface).await {
+        if let Err(e) = self.teardown().await {
             self.events.push(
                 Lvl::Error,
                 Cat::Service,
@@ -278,7 +219,7 @@ impl<A: Backend> Engine<A> {
             self.events
                 .push(Lvl::Error, Cat::Dns, format!("Could not restore DNS backup: {e}"));
         }
-        let ks = inner.persisted.policy.kill_switch;
+        let ks = inner.persisted.policy.kill_switch_active();
         match self.enforce(&mut inner).await {
             Ok(()) if ks => self.events.push(
                 Lvl::Info,
@@ -304,7 +245,24 @@ impl<A: Backend> Engine<A> {
         self.status_tx.borrow().clone()
     }
 
+    /// Where proxies connect now. Proxy mode never falls back to a direct
+    /// connection: anything but a connected tunnel blocks.
+    fn current_egress(inner: &Inner) -> Egress {
+        match inner.persisted.policy.mode {
+            ConnectionMode::Tunnel => Egress::System {
+                udp: inner.active.as_ref().is_none_or(|a| a.udp),
+            },
+            ConnectionMode::Proxy => match (&inner.active, inner.state) {
+                (Some(a), ConnectionState::Connected) => a.proxy_egress.clone(),
+                _ => Egress::Blocked,
+            },
+        }
+    }
+
     fn publish(&self, inner: &Inner) {
+        let egress = Self::current_egress(inner);
+        let local_udp = egress.udp();
+        self.egress.set(egress);
         let a = inner.active.as_ref();
         let spec = inner.spec.as_ref().filter(|_| a.is_some());
         let s = DaemonStatus {
@@ -315,12 +273,12 @@ impl<A: Backend> Engine<A> {
             connected_since: a.map(|a| a.since).filter(|_| inner.state == ConnectionState::Connected),
             stats: a.and_then(|a| a.stats.clone()),
             kill_switch: KillSwitchStatus {
-                enabled: inner.persisted.policy.kill_switch,
+                enabled: inner.persisted.policy.kill_switch_active(),
                 firewall_verified: inner.verified
                     && inner
                         .plan
                         .as_ref()
-                        .map(|p| p.kill_switch == inner.persisted.policy.kill_switch)
+                        .map(|p| p.kill_switch == inner.persisted.policy.kill_switch_active())
                         .unwrap_or(false),
                 firewall_tag: inner.plan.as_ref().filter(|p| p.needs_table()).map(|p| p.tag()),
             },
@@ -333,9 +291,12 @@ impl<A: Backend> Engine<A> {
                 .dns_backend()
                 .unwrap_or(alizy_core::sysprobe::DnsBackend::ResolvConfFile),
             daemon_started: self.started_at,
-            // Absent for WireGuard so its status JSON is unchanged.
-            tunnel_kind: a.filter(|a| a.kind == TunnelKind::Ssh).map(|_| "ssh".to_string()),
+            tunnel_kind: a.and_then(|a| a.kind.status_name()).map(String::from),
             lan_proxy: inner.lan.clone(),
+            local_proxy: LocalProxyStatus {
+                udp: inner.local.udp && local_udp,
+                ..inner.local.clone()
+            },
         };
         self.status_tx.send_replace(s);
     }
@@ -361,12 +322,14 @@ impl<A: Backend> Engine<A> {
     }
 
     fn desired_plan(&self, inner: &Inner) -> FirewallPlan {
-        let policy = &inner.persisted.policy;
-        let tunnel = inner
-            .active
-            .as_ref()
-            .map(|a| tunnel_rules(&self.iface, a, self.ssh.user.map(|u| u.0)));
-        let direct = if inner.persisted.split.enabled {
+        let policy = &inner.persisted.policy.effective();
+        let tunnel = inner.active.as_ref().and_then(|a| {
+            let eps: Vec<SocketAddr> = a.endpoints.iter().flatten().copied().collect();
+            let d = self.driver(a.kind).ok()?;
+            Some(d.firewall_rules(&self.iface, &eps, &a.session))
+        });
+        // Split tunnelling decides what bypasses a full tunnel; proxy mode has none.
+        let direct = if inner.persisted.split.enabled && inner.persisted.policy.mode == ConnectionMode::Tunnel {
             let resolved = inner
                 .persisted
                 .dns_cache
@@ -378,9 +341,11 @@ impl<A: Backend> Engine<A> {
         let lan_cfg = &inner.persisted.lan_proxy;
         let lan_proxy = lan_cfg.enabled.then_some(lan_cfg.port);
         let lan_socks = lan_cfg.enabled.then_some(lan_cfg.socks_port);
+        let guard = (inner.persisted.policy.mode == ConnectionMode::Proxy).then_some(self.iface.as_str());
         FirewallPlan::with_split(policy, tunnel, direct)
             .with_lan_proxy(lan_proxy)
             .with_lan_socks(lan_socks)
+            .with_proxy_guard(guard)
     }
 
     /// Apply the desired firewall atomically and verify it in the kernel.
@@ -440,8 +405,7 @@ impl<A: Backend> Engine<A> {
     /// while protected. Successful lookups refresh the daemon cache.
     async fn resolve_endpoints(&self, inner: &mut Inner, spec: &TunnelSpec) -> Result<Vec<Option<SocketAddr>>, String> {
         let cache = inner.persisted.endpoint_cache.clone();
-        let lookups = spec.config.peers.iter().enumerate().map(|(i, p)| {
-            let ep = p.endpoint.clone();
+        let lookups = spec.tunnel.endpoints().into_iter().enumerate().map(|(i, ep)| {
             let client_cached = spec.cached_endpoints.get(i).copied().flatten();
             let cache = &cache;
             async move {
@@ -500,19 +464,39 @@ impl<A: Backend> Engine<A> {
         Ok(out)
     }
 
+    fn driver(&self, kind: ProtocolKind) -> Result<&dyn TunnelDriver, UpError> {
+        self.drivers
+            .iter()
+            .find(|d| d.kind() == kind)
+            .map(|d| d.as_ref())
+            .ok_or_else(|| UpError::new(ErrorCode::Unsupported, format!("{kind:?} tunnels are not available")))
+    }
+
+    /// Stop every driver's processes, then remove the interface, its routes
+    /// and DNS. Safe to call with nothing running.
+    async fn teardown(&self) -> Result<(), String> {
+        for d in &self.drivers {
+            d.stop().await;
+        }
+        self.adapter.tunnel_down(&self.iface).await
+    }
+
     /// Bring a tunnel up. Firewall first, interface second. On failure the
     /// tunnel is removed and the no-tunnel policy re-applied; state is left to the caller.
     ///
-    /// An SSH bring-up that fails after `cancel` fired reports
+    /// A bring-up that fails after `cancel` fired reports
     /// [`ErrorCode::Cancelled`]: the user disconnected or connected elsewhere,
     /// so it is neither an error nor a reason to reconnect.
     async fn bring_up(&self, inner: &mut Inner, spec: &TunnelSpec, cancel: &CancelToken) -> Result<(), UpError> {
         let result = match self.bring_up_inner(inner, spec, cancel).await {
-            Err(_) if spec.ssh.is_some() && cancel.is_cancelled() => Err(UpError::from(SshError::Cancelled)),
+            Err(_) if cancel.is_cancelled() => Err(UpError::new(
+                ErrorCode::Cancelled,
+                "the connection attempt was cancelled",
+            )),
             r => r,
         };
         if let Err(e) = &result {
-            if let Err(td) = self.adapter.tunnel_down(&self.iface).await {
+            if let Err(td) = self.teardown().await {
                 self.events
                     .push(Lvl::Error, Cat::Connection, format!("Cleanup after failure: {td}"));
             }
@@ -549,41 +533,77 @@ impl<A: Backend> Engine<A> {
         result
     }
 
+    /// The one lifecycle every protocol goes through. The driver supplies the
+    /// protocol steps; firewall, routes and DNS stay here.
+    ///
+    /// Lock hold: this runs under the engine lock. A driver's slow steps
+    /// (SSH: keyscan at most 10 s, readiness at most 20 s) poll `cancel`, which
+    /// `disconnect`/`connect` fire *before* waiting for the lock, so they get
+    /// it within about a second. Status reads use the watch channel and never
+    /// wait. The firewall is applied and verified before any slow step and
+    /// stays in place throughout.
     async fn bring_up_inner(&self, inner: &mut Inner, spec: &TunnelSpec, cancel: &CancelToken) -> Result<(), UpError> {
-        let prev = inner.active.as_ref().map(|a| a.kind);
-        if let Some(ssh) = &spec.ssh {
-            return self.bring_up_ssh(inner, spec, ssh, prev, cancel).await;
+        if cancel.is_cancelled() {
+            // Superseded while waiting for the lock: start nothing.
+            return Err(UpError::new(
+                ErrorCode::Cancelled,
+                "the connection attempt was cancelled",
+            ));
         }
-        if prev == Some(TunnelKind::Ssh) {
-            // Switching SSH -> WireGuard: stop ssh, tun2socks and the forwarder and
-            // remove the TUN first. The old firewall stays in place meanwhile.
-            self.adapter.tunnel_down(&self.iface).await?;
+        let kind = spec.tunnel.kind();
+        let driver = self.driver(kind)?;
+        let policy = inner.persisted.policy.effective();
+        let proxy_mode = policy.mode == ConnectionMode::Proxy;
+        let plan = spec.tunnel.plan(&policy);
+        let mut prev = inner.active.as_ref().map(|a| a.kind);
+        if prev.is_some_and(|p| p != kind) {
+            // Switching protocols: stop the old data plane and remove its
+            // interface first. The old firewall stays in place meanwhile.
+            self.teardown().await?;
+            prev = None;
         }
-        let (public, _) = spec.config.split();
-        for w in compatibility_warnings(&public, &inner.persisted.policy) {
+        for w in compatibility_warnings(&plan.public, &policy) {
             self.events.push(Lvl::Warn, Cat::Connection, w);
         }
         let endpoints = self.resolve_endpoints(inner, spec).await?;
+        let session = driver.prepare()?;
+        let eps: Vec<SocketAddr> = endpoints.iter().flatten().copied().collect();
+        let udp = !driver.firewall_rules(&self.iface, &eps, &session).block_udp;
         inner.active = Some(Active {
-            public: public.clone(),
+            kind,
+            public: plan.public.clone(),
+            dns: (!proxy_mode).then(|| plan.dns.clone()),
             endpoints: endpoints.clone(),
+            proxy_egress: driver.proxy_egress(&session, &plan.dns.servers),
+            udp,
+            session: session.clone(),
             since: now(),
             stats: None,
-            kind: TunnelKind::WireGuard,
-            socks_port: None,
         });
         // 1. Firewall for the new tunnel (old drop rules stay until the new table replaces them atomically).
         self.enforce(inner).await.map_err(|e| format!("firewall: {e}"))?;
-        // 2. Interface, routes, DNS.
-        let policy = inner.persisted.policy.clone();
-        let routes = route_plan(&public, &self.iface, &policy);
-        let dns = dns_plan(&public, &policy);
-        self.adapter
-            .tunnel_up(&self.iface, &spec.config, &endpoints, &routes, &dns)
-            .await?;
-        // tunnel_up tears down the old interface (and its routing rules) before
-        // creating the new one, so the split rule enforce() just installed is
-        // gone — reset the flag so sync re-adds it.
+        let ctx = Ctx {
+            iface: &self.iface,
+            tunnel: &spec.tunnel,
+            endpoints: &endpoints,
+            session: &session,
+            policy: &policy,
+            events: &self.events,
+            cancel,
+        };
+        // 2. Checks that must not disturb the running tunnel.
+        driver.verify(ctx).await?;
+        // 3. Remove the previous tunnel of the same protocol (or any leftover).
+        if prev.is_some() || self.adapter.iface_exists(&self.iface) {
+            self.teardown().await?;
+        }
+        // 4. Interface and data plane, then routes and system DNS.
+        driver.start(ctx).await?;
+        let routes = route_plan(&plan.public, &self.iface, &policy);
+        let dns = (!proxy_mode).then_some(&plan.dns);
+        self.adapter.network_up(&self.iface, &routes, dns).await?;
+        // Teardown removed the interface's routing rules, including the split
+        // rule enforce() just installed: reset the flag so sync re-adds it.
         inner.split_rule_installed = false;
         self.sync_split_rule(inner).await;
         inner.last_error = None;
@@ -592,173 +612,30 @@ impl<A: Backend> Engine<A> {
             Lvl::Info,
             Cat::Connection,
             format!(
-                "Connected to {} via {}.",
+                "Connected to {} via {}{}.",
                 spec.profile_name,
                 endpoints
                     .iter()
                     .flatten()
                     .map(ToString::to_string)
                     .collect::<Vec<_>>()
-                    .join(", ")
+                    .join(", "),
+                kind.connected_suffix()
             ),
         );
         Ok(())
     }
 
-    /// SSH bring-up. The firewall for the new tunnel is enforced first, so
-    /// even with the kill switch on, `ssh-keyscan`/`ssh` (as alizy-ssh) reach
-    /// the server through the ssh_mark chain and the TCP endpoint exception.
-    ///
-    /// Lock hold: this runs under the engine lock (like WireGuard bring-up).
-    /// Bounded worst case, excluding pathological `ip`/`nft` hangs (each capped
-    /// at 15 s by `exec`), is about 40 s:
-    ///
-    /// - previous-tunnel teardown: about 6 s (two 3 s kill waits);
-    /// - firewall apply and verify;
-    /// - either keyscan (unknown key, at most 10 s) or SOCKS readiness (at
-    ///   most 20 s plus one 2 s probe), plus a re-keyscan of at most 10 s
-    ///   when ssh reports a host-key failure;
-    /// - the 0.3 s tun2socks start check.
-    ///
-    /// Status reads use the watch channel and are not blocked; other commands
-    /// wait. `disconnect` and `connect` don't wait for the whole bring-up:
-    /// they fire `cancel` before taking the lock, and the keyscan and
-    /// readiness waits check it every poll (100–250 ms), so they get the lock
-    /// within about a second. The supervision tick (and with it the periodic
-    /// firewall re-verification) still pauses for the length of an SSH
-    /// bring-up attempt; the firewall itself is applied and verified before
-    /// the slow steps start, and stays in place throughout.
-    async fn bring_up_ssh(
-        &self,
-        inner: &mut Inner,
-        spec: &TunnelSpec,
-        ssh: &SshConfig,
-        prev: Option<TunnelKind>,
-        cancel: &CancelToken,
-    ) -> Result<(), UpError> {
-        let user = self.ssh.user.ok_or_else(|| UpError {
-            code: ErrorCode::MissingDependency,
-            msg: MISSING_SSH_USER.into(),
-            host_key: None,
-        })?;
-        if cancel.is_cancelled() {
-            // Superseded while waiting for the lock: start nothing.
-            return Err(SshError::Cancelled.into());
-        }
-        let policy = inner.persisted.policy.clone();
-        let public = ssh_public_config(&ssh.public, &policy);
-        for w in compatibility_warnings(&public, &policy) {
-            self.events.push(Lvl::Warn, Cat::Connection, w);
-        }
-        if prev == Some(TunnelKind::WireGuard) {
-            // Switching WireGuard -> SSH: remove the WireGuard interface first.
-            self.adapter.tunnel_down(&self.iface).await?;
-        }
-        // The literal IP from the profile: the same address ssh is given.
-        let endpoint = SocketAddr::new(ssh.public.host, ssh.public.port);
-        let socks_port =
-            sshb::pick_loopback_port().map_err(|e| format!("no free loopback port for the SSH proxy: {e}"))?;
-        inner.active = Some(Active {
-            public: public.clone(),
-            endpoints: vec![Some(endpoint)],
-            since: now(),
-            stats: None,
-            kind: TunnelKind::Ssh,
-            socks_port: Some(socks_port),
-        });
-        // 1. Firewall for the new tunnel.
-        self.enforce(inner).await.map_err(|e| format!("firewall: {e}"))?;
-        // 2. Unknown server: fetch its key for the user to confirm, then stop.
-        if ssh.public.host_key.is_none() {
-            let key = self
-                .adapter
-                .keyscan(user, endpoint.ip(), endpoint.port(), cancel)
-                .await
-                .map_err(|e| format!("could not fetch the SSH server's host key: {e}"))?;
-            return Err(UpError {
-                code: ErrorCode::HostKeyUnknown,
-                msg: format!(
-                    "the SSH server's host key is not known yet; confirm its fingerprint {} to connect",
-                    key.fingerprint_sha256()
-                ),
-                host_key: Some(key),
-            });
-        }
-        // 3. ssh + tun2socks + DNS forwarder, routes, system DNS.
-        let routes = route_plan(&public, &self.iface, &policy);
-        let dns = ssh_dns_plan(&policy);
-        let upstreams = ssh_upstream_plan(&ssh.public, &policy);
-        if !upstreams.dropped.is_empty() {
-            let list = |v: &[IpAddr]| v.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
-            self.events.push(
-                Lvl::Warn,
-                Cat::Dns,
-                format!(
-                    "Custom DNS servers on your local network can't be reached through an SSH tunnel; using {} (ignored: {}).",
-                    list(&upstreams.servers),
-                    list(&upstreams.dropped)
-                ),
-            );
-        }
-        self.adapter
-            .ssh_up(SshUp {
-                iface: &self.iface,
-                cfg: ssh,
-                user,
-                runtime: &self.ssh.runtime,
-                socks_port,
-                upstreams: upstreams.servers,
-                ipv6: policy.ipv6_enabled,
-                routes: &routes,
-                dns: &dns,
-                cancel: cancel.clone(),
-            })
-            .await?;
-        // ssh_up tears down the previous interface (and its routing rules),
-        // so the split rule enforce() installed above is gone.
-        inner.split_rule_installed = false;
-        self.sync_split_rule(inner).await;
-        inner.last_error = None;
-        inner.reconnect_attempt = 0;
-        self.events.push(
-            Lvl::Info,
-            Cat::Connection,
-            format!("Connected to {} via {endpoint} (SSH).", spec.profile_name),
-        );
-        Ok(())
-    }
-
     pub async fn connect(&self, mut spec: TunnelSpec) -> Result<(), IpcError> {
-        if let Some(ssh) = &spec.ssh {
-            // `config` is a placeholder for SSH profiles and is never used.
-            alizy_core::ssh::validate(ssh).map_err(|e| err(ErrorCode::InvalidConfig, e))?;
-        } else {
-            // The GUI is not trusted to have validated anything: re-parse from scratch.
-            let reparsed = alizy_core::parse(&spec.config.to_wg_quick(true))
-                .map_err(|e| err(ErrorCode::InvalidConfig, e.to_string()))?;
-            spec.config = reparsed.config;
-            if spec.config.peers.is_empty() {
-                return Err(err(ErrorCode::InvalidConfig, "WireGuard configuration has no peers"));
-            }
-        }
+        // The GUI is not trusted to have validated anything: re-check from scratch.
+        spec.tunnel = spec.tunnel.sanitize().map_err(|e| err(ErrorCode::InvalidConfig, e))?;
         for s in [&spec.profile_id, &spec.profile_name] {
             if s.is_empty() || s.len() > 128 || s.chars().any(char::is_control) {
                 return Err(err(ErrorCode::BadRequest, "invalid profile identifier"));
             }
         }
-        if spec.ssh.is_some() {
-            let Some(user) = self.ssh.user else {
-                return Err(err(ErrorCode::MissingDependency, MISSING_SSH_USER));
-            };
-            let missing = self.adapter.ssh_missing(user).await;
-            if !missing.is_empty() {
-                let names: Vec<&str> = missing.iter().map(|d| d.label()).collect();
-                return Err(err(
-                    ErrorCode::MissingDependency,
-                    format!("SSH tunnels need: {}", names.join(", ")),
-                ));
-            }
-        }
+        let driver = self.driver(spec.tunnel.kind()).map_err(UpError::into_ipc)?;
+        driver.preflight().await.map_err(UpError::into_ipc)?;
         // Abandon any bring-up in progress (it holds the lock) before waiting
         // for the lock; this attempt's own token is taken right after, so a
         // later disconnect or connect cancels it in turn.
@@ -787,14 +664,14 @@ impl<A: Backend> Engine<A> {
                 // Waiting for the user, or superseded by the user, not an
                 // error: end like a disconnect (no `error` state, no reconnect
                 // attempt).
-                let ks = inner.persisted.policy.kill_switch;
+                let ks = inner.persisted.policy.kill_switch_active();
                 inner.spec = None;
                 let _ = self.go(&mut inner, Event::DisconnectRequested);
                 let _ = self.go(&mut inner, Event::TornDown { kill_switch: ks });
                 Err(e.into_ipc())
             }
             Err(e) => {
-                let ks = inner.persisted.policy.kill_switch;
+                let ks = inner.persisted.policy.kill_switch_active();
                 inner.spec = None;
                 let _ = self.go(&mut inner, Event::Failed { kill_switch: ks });
                 Err(e.into_ipc())
@@ -814,12 +691,12 @@ impl<A: Backend> Engine<A> {
         }
         self.go(&mut inner, Event::DisconnectRequested)?;
         self.publish(&inner);
-        let down = self.adapter.tunnel_down(&self.iface).await;
+        let down = self.teardown().await;
         inner.active = None;
         inner.spec = None;
         inner.last_error = None;
         let fw = self.enforce(&mut inner).await;
-        let ks = inner.persisted.policy.kill_switch;
+        let ks = inner.persisted.policy.kill_switch_active();
         self.go(&mut inner, Event::TornDown { kill_switch: ks })?;
         self.events.push(
             Lvl::Info,
@@ -852,8 +729,24 @@ impl<A: Backend> Engine<A> {
         let old = inner.persisted.policy.clone();
         inner.persisted.policy = policy.clone();
         self.save(&inner);
+        let mode_changed = old.mode != policy.mode;
+        if mode_changed {
+            self.events.push(
+                Lvl::Info,
+                Cat::Network,
+                match policy.mode {
+                    ConnectionMode::Tunnel => "Switched to tunnel mode: all traffic goes through the VPN.",
+                    ConnectionMode::Proxy => {
+                        "Switched to proxy mode: only apps using Alizy's local proxy go through the VPN."
+                    }
+                },
+            );
+        }
+        // A mode switch rebuilds the tunnel: teardown removes the previous
+        // mode's routes, rules and DNS before the new mode's are installed.
         let needs_rebuild = inner.active.is_some()
-            && (old.ipv4_enabled != policy.ipv4_enabled
+            && (mode_changed
+                || old.ipv4_enabled != policy.ipv4_enabled
                 || old.ipv6_enabled != policy.ipv6_enabled
                 || old.custom_dns != policy.custom_dns);
         let r = if needs_rebuild {
@@ -874,7 +767,7 @@ impl<A: Backend> Engine<A> {
                     let _ = self.go(
                         &mut inner,
                         Event::TornDown {
-                            kill_switch: policy.kill_switch,
+                            kill_switch: policy.kill_switch_active(),
                         },
                     );
                     Ok(())
@@ -883,7 +776,7 @@ impl<A: Backend> Engine<A> {
                     let _ = self.go(
                         &mut inner,
                         Event::Failed {
-                            kill_switch: policy.kill_switch,
+                            kill_switch: policy.kill_switch_active(),
                         },
                     );
                     Err(e.msg)
@@ -892,17 +785,17 @@ impl<A: Backend> Engine<A> {
         } else {
             self.enforce(&mut inner).await
         };
-        if old.kill_switch != policy.kill_switch {
+        if old.kill_switch_active() != policy.kill_switch_active() {
             let _ = self.go(
                 &mut inner,
                 Event::KillSwitchChanged {
-                    enabled: policy.kill_switch,
+                    enabled: policy.kill_switch_active(),
                 },
             );
             self.events.push(
                 Lvl::Info,
                 Cat::Firewall,
-                if policy.kill_switch {
+                if policy.kill_switch_active() {
                     "Kill switch enabled."
                 } else {
                     "Kill switch disabled by user."
@@ -913,6 +806,13 @@ impl<A: Backend> Engine<A> {
             inner.last_error = Some(e.clone());
         }
         self.publish(&inner);
+        if mode_changed
+            || old.proxy_socks_port != policy.proxy_socks_port
+            || old.proxy_http_port != policy.proxy_http_port
+        {
+            self.apply_local(&mut inner).await;
+            self.publish(&inner);
+        }
         r.map_err(|e| err(ErrorCode::Firewall, e))
     }
 
@@ -924,9 +824,31 @@ impl<A: Backend> Engine<A> {
     /// Apply a LAN proxy configuration: persist it, re-render the firewall
     /// (its reply exception is part of the plan) and (re)start the listener.
     /// Lock order is inner → lan, never the other way round.
-    pub async fn set_lan_proxy(&self, cfg: LanProxyConfig) -> Result<LanProxyStatus, IpcError> {
+    pub async fn set_lan_proxy(&self, mut cfg: LanProxyConfig) -> Result<LanProxyStatus, IpcError> {
         cfg.validate().map_err(|e| err(ErrorCode::BadRequest, e))?;
         let mut inner = self.inner.lock().await;
+        if let Some(a) = cfg.auth.as_mut() {
+            // Never trust a verifier from the client: only a password sets one.
+            a.verifier = None;
+            match a.password.take() {
+                Some(pw) => a.verifier = Some(ProxyAuth::make_verifier(&pw, &salt())),
+                None => {
+                    a.verifier = inner
+                        .persisted
+                        .lan_proxy
+                        .auth
+                        .as_ref()
+                        .filter(|old| old.username == a.username)
+                        .and_then(|old| old.verifier.clone());
+                    if a.verifier.is_none() {
+                        return Err(err(
+                            ErrorCode::BadRequest,
+                            "a password is required for the new username",
+                        ));
+                    }
+                }
+            }
+        }
         inner.persisted.lan_proxy = cfg;
         self.save(&inner);
         let r = self.enforce(&mut inner).await;
@@ -956,7 +878,14 @@ impl<A: Backend> Engine<A> {
             listening: false,
             socks_error: None,
             socks_listening: false,
+            auth_username: cfg.auth.as_ref().map(|a| a.username.clone()),
+            socks_udp: false,
         };
+        let opts = ServeOpts {
+            egress: self.egress.clone(),
+            auth: cfg.auth.clone().filter(|a| a.verifier.is_some()).map(Arc::new),
+        };
+        let any = IpAddr::from([0, 0, 0, 0]);
         // Stop the previous listeners first (waiting for sockets to close)
         // so a port change frees the old port immediately.
         let prev = self.lan.lock().await.take();
@@ -969,7 +898,7 @@ impl<A: Backend> Engine<A> {
         }
         if cfg.enabled {
             // HTTP proxy
-            match LanProxy::start(cfg.port).await {
+            match LanProxy::start(any, cfg.port, opts.clone()).await {
                 Ok(p) => {
                     status.listening = true;
                     *self.lan.lock().await = Some(p);
@@ -981,9 +910,10 @@ impl<A: Backend> Engine<A> {
                 }
             }
             // SOCKS5 proxy
-            match LanSocks::start(cfg.socks_port).await {
+            match LanSocks::start(any, cfg.socks_port, opts).await {
                 Ok(p) => {
                     status.socks_listening = true;
+                    status.socks_udp = p.udp();
                     *self.lan_socks.lock().await = Some(p);
                 }
                 Err(e) => {
@@ -1015,16 +945,82 @@ impl<A: Backend> Engine<A> {
                 } else {
                     format!("{addrs} ({})", parts.join(", "))
                 };
+                let who = match &status.auth_username {
+                    Some(u) => format!("devices on this network can use it after logging in as \"{u}\""),
+                    None => "anyone on this network can use it (no password)".to_string(),
+                };
                 self.events.push(
                     Lvl::Info,
                     Cat::Network,
-                    format!("LAN proxy listening on {where_}; anyone on this network can use it (no password)."),
+                    format!("LAN proxy listening on {where_}; {who}."),
                 );
             }
         } else if was_http || was_socks {
             self.events.push(Lvl::Info, Cat::Network, "LAN proxy stopped.");
         }
         inner.lan = status;
+    }
+
+    /// Start or stop proxy mode's local listeners on 127.0.0.1 to match the
+    /// policy. They exist only in proxy mode; their egress follows the tunnel.
+    async fn apply_local(&self, inner: &mut Inner) {
+        let policy = &inner.persisted.policy;
+        let active = policy.mode == ConnectionMode::Proxy;
+        let (socks_port, http_port) = (policy.proxy_socks_port, policy.proxy_http_port);
+        let was = inner.local.socks_listening || inner.local.http_listening;
+        let mut status = LocalProxyStatus {
+            active,
+            socks_port,
+            http_port,
+            ..Default::default()
+        };
+        if let Some(p) = self.local_http.lock().await.take() {
+            p.stop().await;
+        }
+        if let Some(p) = self.local_socks.lock().await.take() {
+            p.stop().await;
+        }
+        if active {
+            let lo = IpAddr::from([127, 0, 0, 1]);
+            let opts = ServeOpts {
+                egress: self.egress.clone(),
+                auth: None,
+            };
+            let mut errors = Vec::new();
+            match LanSocks::start(lo, socks_port, opts.clone()).await {
+                Ok(p) => {
+                    status.socks_listening = true;
+                    status.udp = p.udp();
+                    *self.local_socks.lock().await = Some(p);
+                }
+                Err(e) => errors.push(e.to_string()),
+            }
+            match LanProxy::start(lo, http_port, opts).await {
+                Ok(p) => {
+                    status.http_listening = true;
+                    *self.local_http.lock().await = Some(p);
+                }
+                Err(e) => errors.push(e.to_string()),
+            }
+            if !errors.is_empty() {
+                let e = errors.join("; ");
+                self.events
+                    .push(Lvl::Error, Cat::Network, format!("Local proxy could not start: {e}"));
+                status.error = Some(e);
+            }
+            if status.socks_listening || status.http_listening {
+                self.events.push(
+                    Lvl::Info,
+                    Cat::Network,
+                    format!(
+                        "Local proxy ready: SOCKS5 127.0.0.1:{socks_port}, HTTP 127.0.0.1:{http_port}. It only works while the VPN is connected."
+                    ),
+                );
+            }
+        } else if was {
+            self.events.push(Lvl::Info, Cat::Network, "Local proxy stopped.");
+        }
+        inner.local = status;
     }
 
     pub async fn set_split(&self, mut cfg: SplitConfig) -> Result<(), IpcError> {
@@ -1133,11 +1129,8 @@ impl<A: Backend> Engine<A> {
         .await
         .map_err(|_| err(ErrorCode::Internal, "system probe timed out"))?
         .map_err(|e| err(ErrorCode::Internal, e.to_string()))?;
-        // `probe` only checks that the SSH executables exist (it never runs
-        // ssh as root). The authoritative check, including the OpenSSH
-        // version, runs `ssh -V` as alizy-ssh with a timeout.
-        if let Some(user) = self.ssh.user {
-            r.set_ssh_missing(self.adapter.ssh_missing(user).await);
+        for d in &self.drivers {
+            d.augment_report(&mut r).await;
         }
         *cache = Some((std::time::Instant::now(), r.clone()));
         Ok(r)
@@ -1249,12 +1242,8 @@ impl<A: Backend> Engine<A> {
             self.try_reconnect(&mut inner, t).await;
         }
 
-        if let Some(active) = &inner.active {
-            let dns = match active.kind {
-                TunnelKind::WireGuard => dns_plan(&active.public, &inner.persisted.policy),
-                TunnelKind::Ssh => ssh_dns_plan(&inner.persisted.policy),
-            };
-            match self.adapter.reassert_dns(&dns) {
+        if let Some(dns) = inner.active.as_ref().and_then(|a| a.dns.as_ref()) {
+            match self.adapter.reassert_dns(dns) {
                 Ok(true) => self.events.push(
                     Lvl::Warn,
                     Cat::Dns,
@@ -1270,17 +1259,18 @@ impl<A: Backend> Engine<A> {
     }
 
     async fn health_check(&self, inner: &mut Inner, t: u64) {
-        if inner.active.as_ref().map(|a| a.kind) == Some(TunnelKind::Ssh) {
-            if let Some(why) = self.adapter.ssh_try_exited().await {
-                return self.degraded(inner, &format!("SSH connection lost: {why}")).await;
-            }
-            if !self.adapter.iface_exists(&self.iface) {
-                return self.degraded(inner, "the SSH tunnel interface disappeared").await;
-            }
-        } else if !self.adapter.iface_exists(&self.iface) {
-            return self.degraded(inner, "the WireGuard interface disappeared").await;
+        let Some(kind) = inner.active.as_ref().map(|a| a.kind) else {
+            return;
+        };
+        let Ok(driver) = self.driver(kind) else { return };
+        if let Some(why) = driver.exited().await {
+            return self.degraded(inner, &why).await;
         }
-        let new = match self.adapter.tunnel_stats(&self.iface).await {
+        if !self.adapter.iface_exists(&self.iface) {
+            let why = format!("the {} interface disappeared", kind.interface_label());
+            return self.degraded(inner, &why).await;
+        }
+        let new = match driver.stats(&self.iface).await {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("stats: {e}");
@@ -1306,7 +1296,7 @@ impl<A: Backend> Engine<A> {
     }
 
     async fn degraded(&self, inner: &mut Inner, why: &str) {
-        let ks = inner.persisted.policy.kill_switch;
+        let ks = inner.persisted.policy.kill_switch_active();
         if inner.persisted.policy.auto_reconnect && inner.spec.is_some() {
             self.events.push(
                 Lvl::Warn,
@@ -1326,7 +1316,7 @@ impl<A: Backend> Engine<A> {
         } else {
             self.events
                 .push(Lvl::Error, Cat::Connection, format!("Connection lost: {why}."));
-            let _ = self.adapter.tunnel_down(&self.iface).await;
+            let _ = self.teardown().await;
             inner.active = None;
             inner.spec = None;
             inner.last_error = Some(format!("Connection lost: {why}"));
@@ -1337,7 +1327,7 @@ impl<A: Backend> Engine<A> {
 
     async fn try_reconnect(&self, inner: &mut Inner, t: u64) {
         let Some(spec) = inner.spec.clone() else {
-            let ks = inner.persisted.policy.kill_switch;
+            let ks = inner.persisted.policy.kill_switch_active();
             let _ = self.go(inner, Event::Failed { kill_switch: ks });
             return;
         };
@@ -1358,7 +1348,7 @@ impl<A: Backend> Engine<A> {
             Err(e) if e.code == ErrorCode::Cancelled => {
                 // The user disconnected or connected elsewhere: stop
                 // reconnecting and end like a disconnect.
-                let ks = inner.persisted.policy.kill_switch;
+                let ks = inner.persisted.policy.kill_switch_active();
                 inner.spec = None;
                 let _ = self.go(inner, Event::DisconnectRequested);
                 let _ = self.go(inner, Event::TornDown { kill_switch: ks });
@@ -1373,7 +1363,7 @@ impl<A: Backend> Engine<A> {
                 ) =>
             {
                 // Retrying cannot succeed and would hammer the server: give up.
-                let ks = inner.persisted.policy.kill_switch;
+                let ks = inner.persisted.policy.kill_switch_active();
                 inner.spec = None;
                 let _ = self.go(inner, Event::Failed { kill_switch: ks });
             }
@@ -1402,15 +1392,13 @@ impl<A: Backend> Engine<A> {
             return;
         }
         let Some(spec) = inner.spec.clone() else { return };
-        if spec.ssh.is_some() {
-            // SSH profiles name their server by IP: nothing to re-resolve.
-            return;
-        }
+        // Only hostname endpoints can move; literal addresses never need re-resolving.
         let has_names = spec
-            .config
-            .peers
+            .tunnel
+            .endpoints()
             .iter()
-            .any(|p| matches!(p.endpoint.as_ref().map(|e| &e.host), Some(Host::Name(_))));
+            .flatten()
+            .any(|e| matches!(e.host, Host::Name(_)));
         if !has_names {
             return;
         }
@@ -1424,20 +1412,14 @@ impl<A: Backend> Engine<A> {
                 if let Some(a) = inner.active.as_mut() {
                     a.endpoints = eps.clone();
                 }
-                // Allow the new endpoint in the firewall first, then point WireGuard at it.
+                // Allow the new endpoint in the firewall first, then point the tunnel at it.
                 if let Err(e) = self.enforce(&mut inner).await {
                     return self.degraded(&mut inner, &format!("firewall update failed: {e}")).await;
                 }
-                for (p, ep) in spec.config.peers.iter().zip(eps) {
-                    if let Some(ep) = ep {
-                        if let Err(e) = self
-                            .adapter
-                            .set_endpoint(&self.iface, &p.public_key.to_base64(), ep)
-                            .await
-                        {
-                            self.events
-                                .push(Lvl::Error, Cat::Connection, format!("Updating endpoint failed: {e}"));
-                        }
+                if let Ok(d) = self.driver(spec.tunnel.kind()) {
+                    for e in d.update_endpoints(&self.iface, &spec.tunnel, &eps).await {
+                        self.events
+                            .push(Lvl::Error, Cat::Connection, format!("Updating endpoint failed: {e}"));
                     }
                 }
             }
@@ -1491,7 +1473,7 @@ impl<A: Backend> Engine<A> {
         out.domain_decision = domain.as_deref().map(|d| split::evaluate(rules, Some(d), None));
         let plan = inner.plan.clone();
         let tunnel_up = inner.active.is_some();
-        let ks = inner.persisted.policy.kill_switch;
+        let ks = inner.persisted.policy.kill_switch_active();
         drop(inner);
         let table = firewall::read_table().await.ok().flatten();
         const MAX_TEST_IPS: usize = 16;
@@ -1563,13 +1545,15 @@ impl<A: Backend> Engine<A> {
 
     /// Orderly stop (SIGTERM): remove the tunnel; leave kill-switch protection in place.
     pub async fn shutdown(&self) {
-        // Stop accepting LAN clients before tearing anything down; the
-        // persisted setting brings the listener back on the next start.
+        // Stop accepting proxy clients before tearing anything down; the
+        // persisted settings bring the listeners back on the next start.
         self.lan.lock().await.take();
         self.lan_socks.lock().await.take();
+        self.local_http.lock().await.take();
+        self.local_socks.lock().await.take();
         let mut inner = self.inner.lock().await;
         if inner.active.is_some() {
-            let _ = self.adapter.tunnel_down(&self.iface).await;
+            let _ = self.teardown().await;
             inner.active = None;
         }
         inner.spec = None;
@@ -1578,13 +1562,23 @@ impl<A: Backend> Engine<A> {
         self.events.push(
             Lvl::Info,
             Cat::Service,
-            if inner.persisted.policy.kill_switch {
+            if inner.persisted.policy.kill_switch_active() {
                 "Service stopping; kill switch remains active in the kernel."
             } else {
                 "Service stopping."
             },
         );
     }
+}
+
+/// 16 random bytes for a credential verifier.
+fn salt() -> [u8; 16] {
+    let mut b = [0u8; 16];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        use std::io::Read;
+        let _ = f.read_exact(&mut b);
+    }
+    b
 }
 
 fn on(b: bool) -> &'static str {
@@ -1625,11 +1619,17 @@ async fn futures_join_all<F: std::future::Future>(futs: impl IntoIterator<Item =
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::driver::ssh::{SshDriver, SshEnv, SshOps};
+    use crate::driver::wireguard::{WgOps, WireGuardDriver};
+    use crate::driver::BoxFut;
+    use crate::egress::Egress;
     use crate::linux::ssh::{SshError, SshUp};
     use alizy_core::config::WgConfig;
-    use alizy_core::routing::{DnsPlan, RoutePlan};
+    use alizy_core::firewall::TunnelRules;
+    use alizy_core::protocol::TunnelConfig;
+    use alizy_core::routing::RoutePlan;
     use alizy_core::ssh::{HostKey, SshConfig, SshPublic};
-    use alizy_core::sysprobe::DnsBackend;
+    use alizy_core::sysprobe::Dependency;
     use std::path::PathBuf;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use zeroize::Zeroizing;
@@ -1654,20 +1654,25 @@ mod tests {
     #[derive(Default)]
     struct FakeState {
         log: Vec<String>,
-        /// Which backend is currently up: "wg", "ssh" or none.
+        /// Which data plane is currently up: "wg", "ssh", "rec" or none.
         up: Option<&'static str>,
         applied: Vec<FirewallPlan>,
         ssh_exit: Option<String>,
         ssh_fail: Option<SshError>,
         violations: Vec<String>,
-        /// `ssh_up` blocks (like a server that never authenticates) until cancelled.
+        /// `ssh_up` / the recording driver's start block until cancelled.
         slow: bool,
         /// What `ssh_missing` reports.
         missing: Vec<Dependency>,
         /// Upstreams passed to the last `ssh_up`.
         upstreams: Vec<IpAddr>,
+        /// DNS plan of the last `network_up`.
+        dns: Option<DnsPlan>,
+        /// Recording driver: `exited` reports this once.
+        rec_exit: Option<String>,
     }
 
+    /// Shared fake OS: the platform adapter and every driver's ops record here.
     #[derive(Default)]
     struct Fake(std::sync::Mutex<FakeState>);
 
@@ -1677,49 +1682,40 @@ mod tests {
         }
     }
 
-    impl PlatformAdapter for Fake {
+    struct FakePlatform(Arc<Fake>);
+
+    impl PlatformAdapter for FakePlatform {
         async fn apply_firewall(&self, plan: &FirewallPlan) -> Result<(), String> {
-            self.with(|s| {
+            self.0.with(|s| {
                 s.log.push("fw".into());
                 s.applied.push(plan.clone());
             });
             Ok(())
         }
         async fn verify_firewall(&self, plan: &FirewallPlan) -> Result<bool, String> {
-            Ok(self.with(|s| s.applied.last().map(|p| p.tag()) == Some(plan.tag())))
+            Ok(self.0.with(|s| s.applied.last().map(|p| p.tag()) == Some(plan.tag())))
         }
-        async fn tunnel_up(
-            &self,
-            _iface: &str,
-            _cfg: &WgConfig,
-            _endpoints: &[Option<SocketAddr>],
-            _routes: &RoutePlan,
-            _dns: &DnsPlan,
-        ) -> Result<(), String> {
-            self.with(|s| {
-                if s.up == Some("ssh") {
-                    s.violations
-                        .push("WireGuard brought up while SSH backend still up".into());
+        async fn network_up(&self, _iface: &str, _routes: &RoutePlan, dns: Option<&DnsPlan>) -> Result<(), String> {
+            self.0.with(|s| {
+                s.log.push("net_up".into());
+                s.dns = dns.cloned();
+                if s.up.is_none() {
+                    return Err("interface disappeared during bring-up".into());
                 }
-                s.up = Some("wg");
-                s.log.push("wg_up".into());
-            });
-            Ok(())
+                Ok(())
+            })
         }
         async fn tunnel_down(&self, _iface: &str) -> Result<(), String> {
-            self.with(|s| {
+            self.0.with(|s| {
                 s.up = None;
                 s.ssh_exit = None;
                 s.log.push("down".into());
             });
             Ok(())
         }
-        async fn tunnel_stats(&self, _iface: &str) -> Result<Option<TunnelStats>, String> {
-            Ok(None)
-        }
     }
 
-    impl Backend for Fake {
+    impl Backend for FakePlatform {
         fn dns_backend(&self) -> Option<DnsBackend> {
             None
         }
@@ -1731,42 +1727,73 @@ mod tests {
             Ok(())
         }
         fn iface_exists(&self, _iface: &str) -> bool {
-            self.with(|s| s.up.is_some())
-        }
-        async fn set_endpoint(&self, _iface: &str, _peer: &str, _ep: SocketAddr) -> Result<(), String> {
-            Ok(())
+            self.0.with(|s| s.up.is_some())
         }
         async fn set_split_rule(&self, _want: bool) -> Vec<String> {
             Vec::new()
         }
-        async fn ssh_up(&self, req: SshUp<'_>) -> Result<(), SshError> {
+    }
+
+    struct FakeWg(Arc<Fake>);
+
+    impl WgOps for FakeWg {
+        async fn create(&self, _iface: &str, cfg: &WgConfig, _eps: &[Option<SocketAddr>]) -> Result<(), String> {
+            assert!(!cfg.peers.is_empty());
+            self.0.with(|s| {
+                if s.up.is_some() {
+                    s.violations
+                        .push(format!("WireGuard brought up while {:?} still up", s.up));
+                }
+                s.up = Some("wg");
+                s.log.push("wg_up".into());
+            });
+            Ok(())
+        }
+        async fn set_endpoint(&self, _iface: &str, _peer: &str, _ep: SocketAddr) -> Result<(), String> {
+            self.0.with(|s| s.log.push("wg_set_endpoint".into()));
+            Ok(())
+        }
+        async fn stats(&self, _iface: &str) -> Result<Option<TunnelStats>, String> {
+            Ok(None)
+        }
+    }
+
+    struct FakeSsh(Arc<Fake>);
+
+    impl SshOps for FakeSsh {
+        type Tunnel = ();
+        async fn start(&self, req: SshUp<'_>) -> Result<(), SshError> {
             assert_eq!(req.user, (SSH_UID, SSH_UID));
             assert!(req.socks_port != 0);
-            assert_eq!(req.dns.servers, vec!["127.77.0.1".parse::<IpAddr>().unwrap()]);
-            if self.with(|s| s.slow) {
-                self.with(|s| s.log.push("ssh_up".into()));
+            if self.0.with(|s| s.slow) {
+                self.0.with(|s| s.log.push("ssh_up".into()));
                 // Same shape as wait_ready: poll until ready, ssh exit or cancel.
                 tokio::time::timeout(std::time::Duration::from_secs(30), req.cancel.cancelled())
                     .await
                     .expect("bring-up was never cancelled");
                 return Err(SshError::Cancelled);
             }
-            self.with(|s| {
+            self.0.with(|s| {
                 s.upstreams = req.upstreams.clone();
                 s.log.push("ssh_up".into());
                 if let Some(e) = s.ssh_fail.take() {
                     return Err(e);
                 }
-                if s.up == Some("wg") {
-                    s.violations
-                        .push("SSH brought up while WireGuard backend still up".into());
+                if s.up.is_some() {
+                    s.violations.push(format!("SSH brought up while {:?} still up", s.up));
                 }
                 s.up = Some("ssh");
                 Ok(())
             })
         }
-        async fn ssh_try_exited(&self) -> Option<String> {
-            self.with(|s| s.ssh_exit.take())
+        async fn stop(&self, _t: ()) {
+            self.0.with(|s| s.log.push("ssh_stop".into()));
+        }
+        fn try_exited(&self, _t: &mut ()) -> Option<String> {
+            self.0.with(|s| s.ssh_exit.take())
+        }
+        fn stats(&self, _t: &(), _iface: &str) -> TunnelStats {
+            TunnelStats::default()
         }
         async fn keyscan(
             &self,
@@ -1776,15 +1803,64 @@ mod tests {
             cancel: &CancelToken,
         ) -> Result<HostKey, String> {
             assert_eq!(user, (SSH_UID, SSH_UID));
-            self.with(|s| s.log.push("keyscan".into()));
-            if self.with(|s| s.slow) {
+            self.0.with(|s| s.log.push("keyscan".into()));
+            if self.0.with(|s| s.slow) {
                 cancel.cancelled().await;
                 return Err(SshError::Cancelled.to_string());
             }
             Ok(host_key())
         }
-        async fn ssh_missing(&self, _user: (u32, u32)) -> Vec<Dependency> {
-            self.with(|s| s.missing.clone())
+        async fn missing(&self, _user: (u32, u32)) -> Vec<Dependency> {
+            self.0.with(|s| s.missing.clone())
+        }
+    }
+
+    /// A driver that knows nothing but the trait: proves the engine runs the
+    /// whole lifecycle (firewall, verify, teardown, start, network, health,
+    /// reconnect, cancellation) without any protocol-specific code path.
+    struct Recording(Arc<Fake>);
+
+    impl TunnelDriver for Recording {
+        fn kind(&self) -> ProtocolKind {
+            ProtocolKind::WireGuard
+        }
+        fn prepare(&self) -> Result<Session, UpError> {
+            self.0.with(|s| s.log.push("rec_prepare".into()));
+            Ok(Session { local_port: Some(4242) })
+        }
+        fn firewall_rules(&self, iface: &str, endpoints: &[SocketAddr], session: &Session) -> TunnelRules {
+            TunnelRules {
+                iface: iface.into(),
+                tcp_endpoints: endpoints.to_vec(),
+                socks_port: session.local_port,
+                ..Default::default()
+            }
+        }
+        fn verify<'a>(&'a self, _ctx: Ctx<'a>) -> BoxFut<'a, Result<(), UpError>> {
+            Box::pin(async move {
+                self.0.with(|s| s.log.push("rec_verify".into()));
+                Ok(())
+            })
+        }
+        fn start<'a>(&'a self, ctx: Ctx<'a>) -> BoxFut<'a, Result<(), UpError>> {
+            Box::pin(async move {
+                self.0.with(|s| s.log.push("rec_start".into()));
+                if self.0.with(|s| s.slow) {
+                    ctx.cancel.cancelled().await;
+                    return Err(UpError::from("gave up".to_string()));
+                }
+                self.0.with(|s| s.up = Some("rec"));
+                Ok(())
+            })
+        }
+        fn stop(&self) -> BoxFut<'_, ()> {
+            Box::pin(async move { self.0.with(|s| s.log.push("rec_stop".into())) })
+        }
+        fn exited(&self) -> BoxFut<'_, Option<String>> {
+            Box::pin(async move { self.0.with(|s| s.rec_exit.take()) })
+        }
+        fn stats<'a>(&'a self, _iface: &'a str) -> BoxFut<'a, Result<Option<TunnelStats>, String>> {
+            Box::pin(async { Ok(None) })
         }
     }
 
@@ -1796,13 +1872,14 @@ mod tests {
     }
 
     struct T {
-        engine: Arc<Engine<Fake>>,
+        engine: Arc<Engine<FakePlatform>>,
+        fake: Arc<Fake>,
         _dir: tempfile::TempDir,
     }
 
     impl T {
         fn fake(&self) -> &Fake {
-            &self.engine.adapter
+            &self.fake
         }
         fn log(&self) -> Vec<String> {
             self.fake().with(|s| s.log.clone())
@@ -1812,14 +1889,22 @@ mod tests {
         }
     }
 
-    async fn engine_with(user: Option<(u32, u32)>, kill_switch: bool) -> T {
+    async fn engine_from(
+        kill_switch: bool,
+        drivers: impl FnOnce(&Arc<Fake>, &std::path::Path) -> Vec<Box<dyn TunnelDriver>>,
+    ) -> T {
         let dir = tempfile::tempdir().unwrap();
         let persist = Persist::new(&dir.path().join("state")).unwrap();
-        let ssh = SshEnv {
-            user,
-            runtime: PathBuf::from(dir.path()),
-        };
-        let engine = Engine::start(Fake::default(), persist, Resolver::new(None), "alizy0".into(), ssh).await;
+        let fake = Arc::new(Fake::default());
+        let drivers = drivers(&fake, dir.path());
+        let engine = Engine::start(
+            FakePlatform(fake.clone()),
+            drivers,
+            persist,
+            Resolver::new(None),
+            "alizy0".into(),
+        )
+        .await;
         if kill_switch {
             engine
                 .set_policy(NetworkPolicy {
@@ -1829,7 +1914,27 @@ mod tests {
                 .await
                 .unwrap();
         }
-        T { engine, _dir: dir }
+        T {
+            engine,
+            fake,
+            _dir: dir,
+        }
+    }
+
+    async fn engine_with(user: Option<(u32, u32)>, kill_switch: bool) -> T {
+        engine_from(kill_switch, |f, dir| {
+            vec![
+                Box::new(WireGuardDriver::new(FakeWg(f.clone()))),
+                Box::new(SshDriver::new(
+                    FakeSsh(f.clone()),
+                    SshEnv {
+                        user,
+                        runtime: PathBuf::from(dir),
+                    },
+                )),
+            ]
+        })
+        .await
     }
 
     async fn engine(kill_switch: bool) -> T {
@@ -1843,9 +1948,8 @@ mod tests {
         TunnelSpec {
             profile_id: "wg1".into(),
             profile_name: "WG".into(),
-            config: alizy_core::parse(text).unwrap().config,
+            tunnel: TunnelConfig::WireGuard(alizy_core::parse(text).unwrap().config),
             cached_endpoints: vec![],
-            ssh: None,
         }
     }
 
@@ -1853,9 +1957,7 @@ mod tests {
         TunnelSpec {
             profile_id: "ssh1".into(),
             profile_name: "SSH".into(),
-            config: WgConfig::placeholder(),
-            cached_endpoints: vec![],
-            ssh: Some(SshConfig {
+            tunnel: TunnelConfig::Ssh(SshConfig {
                 public: SshPublic {
                     host: "203.0.113.5".parse().unwrap(),
                     port: 22,
@@ -1865,61 +1967,95 @@ mod tests {
                 },
                 password: Zeroizing::new("pw".into()),
             }),
+            cached_endpoints: vec![],
         }
     }
 
-    fn active(kind: TunnelKind, endpoints: Vec<Option<SocketAddr>>, socks_port: Option<u16>) -> Active {
-        Active {
-            public: alizy_core::routing::ssh_public_config(
-                &ssh_spec(None).ssh.unwrap().public,
-                &NetworkPolicy::default(),
-            ),
-            endpoints,
-            since: 0,
-            stats: None,
-            kind,
-            socks_port,
-        }
-    }
-
-    #[test]
-    fn desired_plan_for_ssh_sets_tcp_and_udp_block() {
-        let ep: SocketAddr = "203.0.113.5:22".parse().unwrap();
-        let a = active(TunnelKind::Ssh, vec![Some(ep)], Some(40000));
-        let r = tunnel_rules("alizy0", &a, Some(SSH_UID));
+    #[tokio::test]
+    async fn lifecycle_is_driven_only_by_the_driver_trait() {
+        let t = engine_from(true, |f, _| vec![Box::new(Recording(f.clone()))]).await;
+        let start = t.log().len();
+        t.engine.connect(wg_spec()).await.unwrap();
+        assert_eq!(t.state().await, ConnectionState::Connected);
+        let log: Vec<String> = t.log()[start..].iter().filter(|l| *l != "rec_stop").cloned().collect();
         assert_eq!(
-            r,
-            TunnelRules {
-                iface: "alizy0".into(),
-                endpoints: vec![],
-                tcp_endpoints: vec![ep],
-                ssh_uid: Some(SSH_UID),
-                socks_port: Some(40000),
-                block_udp: true,
-            }
+            log,
+            ["rec_prepare", "fw", "rec_verify", "rec_start", "net_up"],
+            "{log:?}"
         );
+        // The driver's firewall rules reached the plan unchanged.
+        let tun = t.engine.inner.lock().await.plan.clone().unwrap().tunnel.unwrap();
+        assert_eq!(tun.socks_port, Some(4242));
+        assert_eq!(
+            tun.tcp_endpoints,
+            vec!["198.51.100.7:51820".parse::<SocketAddr>().unwrap()]
+        );
+        // Health: the driver reports its data plane died → reconnect through the same path.
+        t.fake().with(|s| s.rec_exit = Some("engine crashed".into()));
+        t.engine.tick().await;
+        assert_eq!(t.state().await, ConnectionState::Connected);
+        assert_eq!(t.log().iter().filter(|l| *l == "rec_start").count(), 2);
+        assert!(t
+            .engine
+            .events
+            .since(0)
+            .iter()
+            .any(|e| e.message.contains("Connection lost: engine crashed")));
+        // Disconnect stops the driver before the platform removes the interface.
+        let start = t.log().len();
+        t.engine.disconnect().await.unwrap();
+        let log = t.log()[start..].to_vec();
+        let stop = log.iter().position(|l| l == "rec_stop").unwrap();
+        let down = log.iter().position(|l| l == "down").unwrap();
+        assert!(stop < down, "{log:?}");
+        assert_eq!(t.state().await, ConnectionState::Protected);
+        kill_switch_held_throughout(&t);
     }
 
-    #[test]
-    fn desired_plan_for_wg_unchanged() {
-        let ep: SocketAddr = "198.51.100.7:51820".parse().unwrap();
-        let a = active(TunnelKind::WireGuard, vec![Some(ep), None], None);
-        // Even if an SSH user exists, WireGuard rules carry none of the SSH fields.
-        let r = tunnel_rules("alizy0", &a, Some(SSH_UID));
-        let golden = TunnelRules {
-            iface: "alizy0".into(),
-            endpoints: vec![ep],
-            ..Default::default()
-        };
-        assert_eq!(r, golden);
-        let policy = NetworkPolicy {
-            kill_switch: true,
-            ..Default::default()
-        };
-        let plan = FirewallPlan::new(&policy, Some(r));
-        let text = plan.render();
-        assert_eq!(text, FirewallPlan::new(&policy, Some(golden)).render());
-        assert!(!text.contains("ssh_mark") && !text.contains("meta l4proto udp reject"));
+    #[tokio::test]
+    async fn cancellation_is_generic_for_every_driver() {
+        let t = engine_from(true, |f, _| vec![Box::new(Recording(f.clone()))]).await;
+        t.fake().with(|s| s.slow = true);
+        let e = t.engine.clone();
+        let attempt = tokio::spawn(async move { e.connect(wg_spec()).await });
+        wait_for_log(&t, "rec_start").await;
+        let started = std::time::Instant::now();
+        t.engine.disconnect().await.unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert_eq!(attempt.await.unwrap().unwrap_err().code, ErrorCode::Cancelled);
+        assert_eq!(t.state().await, ConnectionState::Protected);
+        assert!(t.engine.status().last_error.is_none());
+        kill_switch_held_throughout(&t);
+    }
+
+    #[tokio::test]
+    async fn unregistered_protocol_is_unsupported_and_touches_nothing() {
+        let t = engine_from(true, |f, _| vec![Box::new(WireGuardDriver::new(FakeWg(f.clone())))]).await;
+        let before = t.fake().with(|s| s.applied.len());
+        let e = t.engine.connect(ssh_spec(Some(host_key()))).await.unwrap_err();
+        assert_eq!(e.code, ErrorCode::Unsupported);
+        assert_eq!(t.fake().with(|s| s.applied.len()), before);
+        assert_eq!(t.state().await, ConnectionState::Protected);
+        t.engine.connect(wg_spec()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn wg_bring_up_order_and_dns_unchanged() {
+        let t = engine(false).await;
+        let start = t.log().len();
+        t.engine.connect(wg_spec()).await.unwrap();
+        let log = t.log()[start..].to_vec();
+        let fw = log.iter().position(|l| l == "fw").unwrap();
+        let up = log.iter().position(|l| l == "wg_up").unwrap();
+        let net = log.iter().position(|l| l == "net_up").unwrap();
+        assert!(fw < up && up < net, "{log:?}");
+        assert_eq!(t.engine.status().tunnel_kind, None);
+        // SSH: the system resolver points at the local forwarder.
+        t.engine.connect(ssh_spec(Some(host_key()))).await.unwrap();
+        assert_eq!(
+            t.fake().with(|s| s.dns.clone()).unwrap(),
+            alizy_core::routing::ssh_dns_plan(&NetworkPolicy::default())
+        );
     }
 
     #[tokio::test]
@@ -2072,7 +2208,7 @@ mod tests {
     async fn wg_connect_without_peers_rejected() {
         let t = engine(false).await;
         let mut spec = wg_spec();
-        spec.config = WgConfig::placeholder();
+        spec.tunnel = TunnelConfig::WireGuard(WgConfig::placeholder());
         let e = t.engine.connect(spec).await.unwrap_err();
         assert_eq!(e.code, ErrorCode::InvalidConfig);
         assert!(!t.log().contains(&"wg_up".to_string()));
@@ -2092,7 +2228,10 @@ mod tests {
     async fn invalid_ssh_config_rejected_before_anything_runs() {
         let t = engine(false).await;
         let mut spec = ssh_spec(Some(host_key()));
-        spec.ssh.as_mut().unwrap().public.username = "-oProxyCommand=x".into();
+        let TunnelConfig::Ssh(c) = &mut spec.tunnel else {
+            unreachable!()
+        };
+        c.public.username = "-oProxyCommand=x".into();
         let e = t.engine.connect(spec).await.unwrap_err();
         assert_eq!(e.code, ErrorCode::InvalidConfig);
         assert!(!t.log().iter().any(|l| l == "ssh_up" || l == "keyscan"));
@@ -2255,6 +2394,7 @@ mod tests {
                 enabled: true,
                 port,
                 socks_port,
+                auth: None,
             })
             .await
             .unwrap();
@@ -2293,7 +2433,8 @@ mod tests {
             LanProxyConfig {
                 enabled: true,
                 port,
-                socks_port
+                socks_port,
+                auth: None,
             }
         );
 
@@ -2303,6 +2444,7 @@ mod tests {
                 enabled: false,
                 port,
                 socks_port,
+                auth: None,
             })
             .await
             .unwrap();
@@ -2326,6 +2468,7 @@ mod tests {
                 enabled: true,
                 port,
                 socks_port,
+                auth: None,
             })
             .await
             .unwrap();
@@ -2340,6 +2483,7 @@ mod tests {
                 enabled: true,
                 port,
                 socks_port,
+                auth: None,
             })
             .await
             .unwrap();
@@ -2356,6 +2500,7 @@ mod tests {
                 enabled: true,
                 port: 0,
                 socks_port: 1080,
+                auth: None,
             })
             .await
             .unwrap_err();
@@ -2368,10 +2513,155 @@ mod tests {
                 enabled: true,
                 port,
                 socks_port,
+                auth: None,
             })
             .await
             .unwrap();
         assert!(st.enabled && st.listening && st.error.is_none(), "{st:?}");
         assert_eq!(t.state().await, ConnectionState::Disconnected);
+    }
+
+    fn proxy_policy(ks: bool) -> NetworkPolicy {
+        let (socks, http) = two_free_ports();
+        NetworkPolicy {
+            kill_switch: ks,
+            mode: ConnectionMode::Proxy,
+            proxy_socks_port: socks,
+            proxy_http_port: http,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_mode_leaves_system_alone_and_fails_closed() {
+        let t = engine(false).await;
+        let policy = proxy_policy(true);
+        t.engine.set_policy(policy.clone()).await.unwrap();
+        // No tunnel yet: no kill switch (proxy mode), egress blocked, listeners up.
+        assert_eq!(t.state().await, ConnectionState::Disconnected);
+        assert_eq!(*t.engine.egress.get(), Egress::Blocked);
+        let st = t.engine.status();
+        assert!(
+            !st.kill_switch.enabled && st.policy.kill_switch,
+            "preference kept, switch inactive"
+        );
+        assert!(st.local_proxy.active && st.local_proxy.socks_listening && st.local_proxy.http_listening);
+        let plan = t.engine.inner.lock().await.plan.clone().unwrap();
+        assert_eq!(plan.proxy_guard.as_deref(), Some("alizy0"));
+        assert!(!plan.kill_switch);
+
+        t.engine.connect(wg_spec()).await.unwrap();
+        assert_eq!(t.state().await, ConnectionState::Connected);
+        // System DNS untouched; firewall guards marked traffic; egress is marked.
+        assert_eq!(t.fake().with(|s| s.dns.clone()), None);
+        let plan = t.engine.inner.lock().await.plan.clone().unwrap();
+        assert!(plan.proxy_guard.is_some() && !plan.kill_switch && !plan.dns_leak_protection);
+        assert!(
+            matches!(&*t.engine.egress.get(), Egress::Marked { mark, .. } if *mark == alizy_core::firewall::PROXY_MARK)
+        );
+        // The local proxy refuses rather than connecting directly once the tunnel is gone.
+        t.engine.disconnect().await.unwrap();
+        assert_eq!(*t.engine.egress.get(), Egress::Blocked);
+        let mut c = tokio::net::TcpStream::connect(("127.0.0.1", policy.proxy_socks_port))
+            .await
+            .unwrap();
+        c.write_all(&[5, 1, 0]).await.unwrap();
+        let mut g = [0u8; 2];
+        c.read_exact(&mut g).await.unwrap();
+        c.write_all(&[5, 1, 0, 1, 127, 0, 0, 1, 0, 80]).await.unwrap();
+        let mut r = [0u8; 2];
+        c.read_exact(&mut r).await.unwrap();
+        assert_eq!(r[1], 0x02, "connection not allowed while the VPN is down");
+    }
+
+    #[tokio::test]
+    async fn ssh_proxy_mode_goes_through_ssh_socks_port() {
+        let t = engine(false).await;
+        t.engine.set_policy(proxy_policy(false)).await.unwrap();
+        t.engine.connect(ssh_spec(Some(host_key()))).await.unwrap();
+        let port = t
+            .engine
+            .inner
+            .lock()
+            .await
+            .active
+            .as_ref()
+            .unwrap()
+            .session
+            .local_port
+            .unwrap();
+        assert_eq!(
+            *t.engine.egress.get(),
+            Egress::Socks(SocketAddr::from(([127, 0, 0, 1], port)))
+        );
+        assert!(!t.engine.status().local_proxy.udp, "SSH carries no UDP");
+    }
+
+    #[tokio::test]
+    async fn switching_mode_rebuilds_and_restores_the_kill_switch() {
+        let t = engine(true).await;
+        t.engine.connect(wg_spec()).await.unwrap();
+        assert!(t.fake().with(|s| s.dns.is_some()));
+        let start = t.log().len();
+        let mut p = proxy_policy(true);
+        t.engine.set_policy(p.clone()).await.unwrap();
+        let log = t.log()[start..].to_vec();
+        let down = log.iter().position(|l| l == "down").expect("previous mode cleaned up");
+        let up = log.iter().position(|l| l == "wg_up").unwrap();
+        assert!(down < up, "{log:?}");
+        assert_eq!(t.state().await, ConnectionState::Connected);
+        assert!(!t.engine.status().kill_switch.enabled);
+        assert_eq!(t.fake().with(|s| s.dns.clone()), None);
+        // Back to tunnel mode: kill switch and system DNS return, local proxy stops.
+        p.mode = ConnectionMode::Tunnel;
+        t.engine.set_policy(p.clone()).await.unwrap();
+        let st = t.engine.status();
+        assert!(st.kill_switch.enabled && !st.local_proxy.active && !st.local_proxy.socks_listening);
+        assert!(t.fake().with(|s| s.dns.is_some()));
+        assert!(t.engine.inner.lock().await.plan.as_ref().unwrap().proxy_guard.is_none());
+        assert!(tokio::net::TcpStream::connect(("127.0.0.1", p.proxy_socks_port))
+            .await
+            .is_err());
+        // Disconnected in proxy mode with the preference on: not Protected.
+        t.engine.disconnect().await.unwrap();
+        assert_eq!(t.state().await, ConnectionState::Protected);
+        p.mode = ConnectionMode::Proxy;
+        t.engine.set_policy(p).await.unwrap();
+        assert_eq!(t.state().await, ConnectionState::Disconnected);
+    }
+
+    #[tokio::test]
+    async fn lan_credentials_are_hashed_and_kept() {
+        let t = engine(false).await;
+        let (port, socks_port) = two_free_ports();
+        let auth = |pw: Option<&str>, user: &str| {
+            Some(alizy_core::ipc::ProxyAuth {
+                username: user.into(),
+                password: pw.map(|p| Zeroizing::new(p.into())),
+                verifier: Some("ff$00".into()), // a client-sent verifier is ignored
+            })
+        };
+        let cfg = |a| LanProxyConfig {
+            enabled: true,
+            port,
+            socks_port,
+            auth: a,
+        };
+        let st = t.engine.set_lan_proxy(cfg(auth(Some("pw1"), "tv"))).await.unwrap();
+        assert_eq!(st.auth_username.as_deref(), Some("tv"));
+        assert!(st.socks_udp);
+        let stored = t.engine.inner.lock().await.persisted.lan_proxy.auth.clone().unwrap();
+        assert!(stored.password.is_none());
+        assert!(stored.check(b"tv", b"pw1") && !stored.verifier.as_deref().unwrap().starts_with("ff$"));
+        // Same user, no password: the old one stays.
+        t.engine.set_lan_proxy(cfg(auth(None, "tv"))).await.unwrap();
+        let again = t.engine.inner.lock().await.persisted.lan_proxy.auth.clone().unwrap();
+        assert!(again.check(b"tv", b"pw1"));
+        // New user without a password: refused.
+        let e = t.engine.set_lan_proxy(cfg(auth(None, "phone"))).await.unwrap_err();
+        assert_eq!(e.code, ErrorCode::BadRequest);
+        // Removing auth opens it again.
+        let st = t.engine.set_lan_proxy(cfg(None)).await.unwrap();
+        assert!(st.auth_username.is_none());
     }
 }

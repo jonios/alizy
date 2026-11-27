@@ -2,7 +2,7 @@
 //! executes them without a shell.
 
 use crate::config::{PublicConfig, PublicPeer};
-use crate::firewall::{NetworkPolicy, FWMARK};
+use crate::firewall::{ConnectionMode, NetworkPolicy, FWMARK, PROXY_MARK};
 use crate::keys::PublicKey;
 use crate::ssh::SshPublic;
 use ipnet::IpNet;
@@ -12,6 +12,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 /// Policy-routing table id (same value as the fwmark, like wg-quick).
 pub const ROUTE_TABLE: u32 = FWMARK;
 /// Owned `ip rule` priorities. Removal is by priority so foreign rules are never touched.
+pub const RULE_PRIO_PROXY: u32 = 19028;
 pub const RULE_PRIO_SPLIT: u32 = 19029;
 pub const RULE_PRIO_SUPPRESS: u32 = 19030;
 pub const RULE_PRIO_TUNNEL: u32 = 19031;
@@ -53,6 +54,9 @@ pub fn route_plan(cfg: &PublicConfig, iface: &str, policy: &NetworkPolicy) -> Ro
     }
     let mtu = cfg.mtu.unwrap_or(DEFAULT_MTU).to_string();
     plan.up.push(v(&["ip", "link", "set", "dev", iface, "mtu", &mtu, "up"]));
+    if policy.mode == ConnectionMode::Proxy {
+        return proxy_routes(cfg, iface, plan);
+    }
 
     let mut nets: Vec<IpNet> = cfg
         .peers
@@ -119,6 +123,51 @@ pub fn route_plan(cfg: &PublicConfig, iface: &str, policy: &NetworkPolicy) -> Ro
     plan
 }
 
+/// Proxy mode: every captured prefix goes into Alizy's table only, and the
+/// table is reached only by sockets marked `PROXY_MARK` (the local proxy).
+/// The system's own traffic keeps using the main table.
+fn proxy_routes(cfg: &PublicConfig, iface: &str, mut plan: RoutePlan) -> RoutePlan {
+    let mut nets: Vec<IpNet> = cfg.peers.iter().flat_map(|p| p.allowed_ips.iter().copied()).collect();
+    nets.sort();
+    nets.dedup();
+    let table = ROUTE_TABLE.to_string();
+    for n in &nets {
+        plan.up.push(v(&[
+            "ip",
+            fam_flag(n),
+            "route",
+            "replace",
+            &n.to_string(),
+            "dev",
+            iface,
+            "table",
+            &table,
+        ]));
+    }
+    for fam in ["-4", "-6"] {
+        plan.up.push(proxy_rule(fam, "add"));
+    }
+    // Replies get the mark back from conntrack (firewall `proxy_pre`); strict
+    // reverse-path filtering must take it into account.
+    plan.sysctls.push("net.ipv4.conf.all.src_valid_mark".into());
+    plan
+}
+
+fn proxy_rule(fam: &str, verb: &str) -> Vec<String> {
+    v(&[
+        "ip",
+        fam,
+        "rule",
+        verb,
+        "fwmark",
+        &format!("{PROXY_MARK:#x}"),
+        "table",
+        &ROUTE_TABLE.to_string(),
+        "priority",
+        &RULE_PRIO_PROXY.to_string(),
+    ])
+}
+
 /// `ip rule` sending split-tunnel "direct" traffic (marked SPLIT_MARK) to the main table.
 pub fn split_rule_commands(add: bool) -> Vec<Vec<String>> {
     let mark = format!("{:#x}", crate::firewall::SPLIT_MARK);
@@ -141,6 +190,7 @@ pub fn teardown_commands(iface: &str) -> Vec<Vec<String>> {
     let mut out = Vec::new();
     let table = ROUTE_TABLE.to_string();
     for fam in ["-4", "-6"] {
+        out.push(proxy_rule(fam, "del"));
         out.extend(split_rule_commands(false).into_iter().filter(|c| c[1] == fam));
         out.push(v(&[
             "ip",
@@ -407,6 +457,27 @@ mod tests {
         assert!(flat.contains(&"ip -6 rule add table main suppress_prefixlength 0 priority 19030".to_string()));
         assert!(flat.contains(&"ip link set dev alizy0 mtu 1420 up".to_string()));
         assert_eq!(p.sysctls, vec!["net.ipv4.conf.all.src_valid_mark"]);
+    }
+
+    #[test]
+    fn proxy_mode_routes_only_marked_traffic() {
+        let pol = NetworkPolicy {
+            mode: ConnectionMode::Proxy,
+            ..Default::default()
+        };
+        let p = route_plan(&cfg(), "alizy0", &pol);
+        let flat: Vec<String> = p.up.iter().map(|a| a.join(" ")).collect();
+        assert!(flat.contains(&"ip -4 route replace 0.0.0.0/0 dev alizy0 table 19034".to_string()));
+        assert!(flat.contains(&"ip -4 rule add fwmark 0x4a5c table 19034 priority 19028".to_string()));
+        assert!(flat.contains(&"ip -6 rule add fwmark 0x4a5c table 19034 priority 19028".to_string()));
+        // The system's own traffic is never captured.
+        assert!(!flat
+            .iter()
+            .any(|c| c.contains("not fwmark") || c.contains("suppress_prefixlength")));
+        assert!(!p.full_tunnel_v4 && !p.full_tunnel_v6);
+        assert_eq!(p.sysctls, vec!["net.ipv4.conf.all.src_valid_mark"]);
+        let down: Vec<String> = teardown_commands("alizy0").iter().map(|a| a.join(" ")).collect();
+        assert!(down.contains(&"ip -4 rule del fwmark 0x4a5c table 19034 priority 19028".to_string()));
     }
 
     #[test]

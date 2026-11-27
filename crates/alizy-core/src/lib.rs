@@ -8,6 +8,7 @@ pub mod ipc;
 pub mod keys;
 pub mod platform;
 pub mod profile;
+pub mod protocol;
 pub mod routing;
 pub mod split;
 pub mod ssh;
@@ -16,6 +17,7 @@ pub mod sysprobe;
 
 pub use config::{parse, ConfigError, ParseOutcome, PublicConfig, WgConfig};
 pub use firewall::{FirewallPlan, NetworkPolicy};
+pub use protocol::{ProtocolKind, TunnelConfig, TunnelPlan};
 pub use ssh::{HostKey, SshConfig, SshPublic};
 pub use state::ConnectionState;
 

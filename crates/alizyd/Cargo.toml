@@ -16,6 +16,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
 zeroize.workspace = true
+base64.workspace = true
 nix = { version = "0.30", features = ["user", "fs", "process", "socket"] }
 libc = "0.2"
 

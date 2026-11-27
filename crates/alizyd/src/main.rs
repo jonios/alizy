@@ -9,6 +9,10 @@ mod auth;
 #[cfg(target_os = "linux")]
 mod cancel;
 #[cfg(target_os = "linux")]
+mod driver;
+#[cfg(target_os = "linux")]
+mod egress;
+#[cfg(target_os = "linux")]
 mod engine;
 #[cfg(target_os = "linux")]
 mod events;
@@ -16,6 +20,7 @@ mod events;
 mod exec;
 #[cfg(target_os = "linux")]
 mod lan_proxy;
+#[cfg(target_os = "linux")]
 mod lan_socks;
 #[cfg(target_os = "linux")]
 mod linux;
@@ -59,7 +64,10 @@ fn main() {
 #[cfg(target_os = "linux")]
 mod linux_main {
     use crate::auth::{AuthMode, Authorizer};
-    use crate::engine::{Engine, SshEnv};
+    use crate::driver::ssh::{LinuxSsh, SshDriver, SshEnv};
+    use crate::driver::wireguard::{LinuxWg, WireGuardDriver};
+    use crate::driver::TunnelDriver;
+    use crate::engine::Engine;
     use crate::linux::{self, LinuxAdapter};
     use crate::persist::Persist;
     use crate::resolver::Resolver;
@@ -274,12 +282,17 @@ mod linux_main {
             Persist::new(&args.state_dir).with_context(|| format!("state dir {}", args.state_dir.display()))?;
         let adapter = LinuxAdapter::new(&args.state_dir, dns_override, args.resolv_conf.clone()).await;
         tracing::info!(dns_backend = ?adapter.dns_backend(), "alizyd {} starting", env!("CARGO_PKG_VERSION"));
+        // The protocol registry: the only place that lists concrete drivers.
+        let drivers: Vec<Box<dyn TunnelDriver>> = vec![
+            Box::new(WireGuardDriver::new(LinuxWg)),
+            Box::new(SshDriver::new(LinuxSsh, ssh_env())),
+        ];
         let engine = Engine::start(
             adapter,
+            drivers,
             persist,
             Resolver::new(args.resolv_conf.clone()),
             args.iface.clone(),
-            ssh_env(),
         )
         .await;
 

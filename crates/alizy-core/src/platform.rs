@@ -1,15 +1,13 @@
 //! Platform adapter contract.
 //!
-//! Each operating system implements tunnel, firewall and DNS control with its
-//! own native mechanism. The trait is deliberately small and synchronous at
-//! the boundary of "apply a plan / verify it", so the security-critical policy
-//! decisions stay in this crate.
+//! Each operating system implements firewall, routing and DNS control with
+//! its own native mechanism. The contract is protocol-neutral: creating a
+//! tunnel's interface is a protocol driver's job (see `alizyd::driver`); the
+//! platform applies the plans this crate renders for any tunnel. The
+//! security-critical policy decisions stay in this crate.
 
-use crate::config::WgConfig;
 use crate::firewall::FirewallPlan;
-use crate::ipc::TunnelStats;
 use crate::routing::{DnsPlan, RoutePlan};
-use std::net::SocketAddr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
@@ -55,14 +53,10 @@ pub trait PlatformAdapter: Send + Sync {
     async fn apply_firewall(&self, plan: &FirewallPlan) -> AdapterResult<()>;
     /// Read the firewall back from the OS; Ok(true) only if `plan` is active.
     async fn verify_firewall(&self, plan: &FirewallPlan) -> AdapterResult<bool>;
-    async fn tunnel_up(
-        &self,
-        iface: &str,
-        cfg: &WgConfig,
-        endpoints: &[Option<SocketAddr>],
-        routes: &RoutePlan,
-        dns: &DnsPlan,
-    ) -> AdapterResult<()>;
+    /// Install routes and (unless `None`, as in proxy mode) system DNS for a
+    /// tunnel interface a driver created, then confirm it still exists.
+    async fn network_up(&self, iface: &str, routes: &RoutePlan, dns: Option<&DnsPlan>) -> AdapterResult<()>;
+    /// Restore DNS and remove the interface and its routing rules. Drivers
+    /// stop their own processes before this runs.
     async fn tunnel_down(&self, iface: &str) -> AdapterResult<()>;
-    async fn tunnel_stats(&self, iface: &str) -> AdapterResult<Option<TunnelStats>>;
 }

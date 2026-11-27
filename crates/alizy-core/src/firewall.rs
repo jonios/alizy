@@ -18,6 +18,23 @@ pub const FWMARK: u32 = 0x4a5a;
 pub const TUNNEL_IFACE: &str = "alizy0";
 /// Mark for split-tunnel "direct" traffic; `ip rule fwmark SPLIT_MARK lookup main`.
 pub const SPLIT_MARK: u32 = 0x4a5b;
+/// Mark set on the sockets of Alizy's local proxy in proxy mode; only
+/// `ip rule fwmark PROXY_MARK lookup ROUTE_TABLE` routes it, into the tunnel.
+pub const PROXY_MARK: u32 = 0x4a5c;
+pub const DEFAULT_PROXY_SOCKS_PORT: u16 = 10808;
+pub const DEFAULT_PROXY_HTTP_PORT: u16 = 10809;
+
+/// How the tunnel is used.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionMode {
+    /// TUN/full tunnel: all system traffic goes through the VPN; kill switch available.
+    #[default]
+    Tunnel,
+    /// Only apps that use Alizy's local SOCKS5/HTTP proxy go through the VPN;
+    /// system routes and DNS are left alone and there is no kill switch.
+    Proxy,
+}
 
 const LAN_V4: &str = "10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 224.0.0.0/4, 255.255.255.255";
 const LAN_V6: &str = "fe80::/10, fc00::/7, ff00::/8";
@@ -34,6 +51,10 @@ pub struct NetworkPolicy {
     /// Overrides the profile's DNS servers when non-empty.
     pub custom_dns: Vec<IpAddr>,
     pub auto_reconnect: bool,
+    pub mode: ConnectionMode,
+    /// Local proxy ports on 127.0.0.1 (proxy mode only).
+    pub proxy_socks_port: u16,
+    pub proxy_http_port: u16,
 }
 
 impl Default for NetworkPolicy {
@@ -46,6 +67,9 @@ impl Default for NetworkPolicy {
             dns_leak_protection: true,
             custom_dns: Vec::new(),
             auto_reconnect: true,
+            mode: ConnectionMode::Tunnel,
+            proxy_socks_port: DEFAULT_PROXY_SOCKS_PORT,
+            proxy_http_port: DEFAULT_PROXY_HTTP_PORT,
         }
     }
 }
@@ -63,7 +87,35 @@ impl NetworkPolicy {
                 return Err(format!("{d} is not a usable DNS server"));
             }
         }
+        if self.proxy_socks_port == 0 || self.proxy_http_port == 0 {
+            return Err("local proxy ports must be between 1 and 65535".into());
+        }
+        if self.proxy_socks_port == self.proxy_http_port {
+            return Err("local SOCKS5 and HTTP proxy ports must be different".into());
+        }
         Ok(())
+    }
+
+    /// The kill switch only exists in tunnel mode. The stored preference is
+    /// kept so switching back to tunnel mode restores it.
+    pub fn kill_switch_active(&self) -> bool {
+        self.kill_switch && self.mode == ConnectionMode::Tunnel
+    }
+
+    /// The policy the firewall, routes and DNS are planned from. Proxy mode
+    /// leaves the system's own traffic alone: no kill switch, no family
+    /// blocking, no DNS redirection or leak blocking.
+    pub fn effective(&self) -> NetworkPolicy {
+        match self.mode {
+            ConnectionMode::Tunnel => self.clone(),
+            ConnectionMode::Proxy => NetworkPolicy {
+                kill_switch: false,
+                ipv4_enabled: true,
+                ipv6_enabled: true,
+                dns_leak_protection: false,
+                ..self.clone()
+            },
+        }
     }
 }
 
@@ -106,6 +158,11 @@ pub struct FirewallPlan {
     /// TCP source port of the SOCKS5 LAN proxy (same rationale as HTTP).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lan_socks_port: Option<u16>,
+    /// Proxy mode: the tunnel interface that `PROXY_MARK` traffic must leave
+    /// through. Marked packets headed anywhere else are rejected, so the local
+    /// proxy can never reach the internet directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_guard: Option<String>,
 }
 
 impl FirewallPlan {
@@ -130,7 +187,13 @@ impl FirewallPlan {
             tunnel,
             lan_proxy_port: None,
             lan_socks_port: None,
+            proxy_guard: None,
         }
+    }
+
+    pub fn with_proxy_guard(mut self, iface: Option<&str>) -> Self {
+        self.proxy_guard = iface.map(String::from);
+        self
     }
 
     /// Allow the LAN proxy's replies to reach the devices that asked for
@@ -148,6 +211,7 @@ impl FirewallPlan {
     /// Whether any rule needs to be installed at all.
     pub fn needs_table(&self) -> bool {
         self.kill_switch
+            || self.proxy_guard.is_some()
             || !self.ipv4_enabled
             || !self.ipv6_enabled
             || (self.dns_leak_protection && self.tunnel.is_some())
@@ -186,6 +250,7 @@ impl FirewallPlan {
         self.render_split(&mut s);
         self.render_ssh_mark(&mut s);
         self.render_wg_mark(&mut s);
+        self.render_proxy_mark(&mut s);
         self.render_output(&mut s, &tag);
         self.render_input(&mut s);
         self.render_forward(&mut s);
@@ -350,9 +415,33 @@ impl FirewallPlan {
         s.push_str("  }\n");
     }
 
+    /// Proxy mode: the local proxy's sockets carry PROXY_MARK, but the
+    /// replies arriving on the tunnel don't. Copy the mark to conntrack and
+    /// back onto the replies so strict reverse-path filtering (with
+    /// src_valid_mark) finds them routed via the tunnel and accepts them.
+    fn render_proxy_mark(&self, s: &mut String) {
+        if self.proxy_guard.is_none() {
+            return;
+        }
+        s.push_str("  chain proxy_mark {\n");
+        s.push_str("    type filter hook output priority mangle; policy accept;\n");
+        let _ = writeln!(s, "    meta mark {PROXY_MARK:#x} ct mark set meta mark");
+        s.push_str("  }\n");
+        s.push_str("  chain proxy_pre {\n");
+        s.push_str("    type filter hook prerouting priority mangle; policy accept;\n");
+        let _ = writeln!(s, "    ct mark {PROXY_MARK:#x} meta mark set ct mark");
+        s.push_str("  }\n");
+    }
+
     fn render_output(&self, s: &mut String, tag: &str) {
         s.push_str("  chain output {\n");
         s.push_str("    type filter hook output priority filter - 10; policy accept;\n");
+        if let Some(iface) = &self.proxy_guard {
+            let _ = writeln!(
+                s,
+                "    meta mark {PROXY_MARK:#x} oifname != {{ \"lo\", \"{iface}\" }} counter reject with icmpx admin-prohibited comment \"proxy-guard\""
+            );
+        }
         if let Some(t) = &self.tunnel {
             if let (Some(uid), Some(port)) = (t.ssh_uid, t.socks_port) {
                 // ssh's SOCKS port is an open proxy out of the machine: only
@@ -408,14 +497,17 @@ impl FirewallPlan {
                 );
             }
             if let Some(port) = self.lan_socks_port {
-                let _ = writeln!(
-                    s,
-                    "    tcp sport {port} ip daddr {{ {LAN_V4} }} accept comment \"lan-socks\""
-                );
-                let _ = writeln!(
-                    s,
-                    "    tcp sport {port} ip6 daddr {{ {LAN_V6} }} accept comment \"lan-socks\""
-                );
+                // TCP for the proxy, UDP for its UDP ASSOCIATE relay (same port).
+                for proto in ["tcp", "udp"] {
+                    let _ = writeln!(
+                        s,
+                        "    {proto} sport {port} ip daddr {{ {LAN_V4} }} accept comment \"lan-socks\""
+                    );
+                    let _ = writeln!(
+                        s,
+                        "    {proto} sport {port} ip6 daddr {{ {LAN_V6} }} accept comment \"lan-socks\""
+                    );
+                }
             }
             if self.has_direct() {
                 s.push_str("    ip daddr @direct4 accept comment \"split-direct\"\n");
@@ -646,6 +738,54 @@ mod tests {
         assert!(!r.contains("dns-leak"));
         let r = FirewallPlan::new(&NetworkPolicy::default(), tunnel()).render();
         assert!(r.contains("dns-leak"));
+    }
+
+    #[test]
+    fn proxy_mode_has_no_kill_switch_and_guards_marked_traffic() {
+        let p = NetworkPolicy {
+            kill_switch: true,
+            ipv6_enabled: false,
+            mode: ConnectionMode::Proxy,
+            ..Default::default()
+        };
+        assert!(p.kill_switch, "the preference itself is kept");
+        assert!(!p.kill_switch_active());
+        let eff = p.effective();
+        assert!(!eff.kill_switch && eff.ipv6_enabled && !eff.dns_leak_protection);
+        let plan = FirewallPlan::new(&eff, tunnel()).with_proxy_guard(Some("alizy0"));
+        let text = plan.render();
+        assert!(text.contains(
+            "meta mark 0x4a5c oifname != { \"lo\", \"alizy0\" } counter reject with icmpx admin-prohibited comment \"proxy-guard\""
+        ));
+        assert!(!text.contains("kill-switch") && !text.contains("dns-leak") && !text.contains("ipv6-disabled"));
+        assert!(
+            text.contains("meta mark 0x4a5c ct mark set meta mark")
+                && text.contains("ct mark 0x4a5c meta mark set ct mark")
+        );
+        // The guard alone needs the table, even with no tunnel up.
+        assert!(FirewallPlan::new(&eff, None)
+            .with_proxy_guard(Some("alizy0"))
+            .needs_table());
+        // Tunnel mode: unchanged plan, unchanged tag.
+        let t = NetworkPolicy {
+            kill_switch: true,
+            ..Default::default()
+        };
+        assert!(t.kill_switch_active() && t.effective() == t);
+        assert!(!FirewallPlan::new(&t, tunnel()).render().contains("proxy-guard"));
+    }
+
+    #[test]
+    fn old_policy_json_loads_in_tunnel_mode() {
+        let p: NetworkPolicy = serde_json::from_str(r#"{"kill_switch":true,"allow_lan":false}"#).unwrap();
+        assert_eq!(p.mode, ConnectionMode::Tunnel);
+        assert_eq!((p.proxy_socks_port, p.proxy_http_port), (10808, 10809));
+        assert!(NetworkPolicy {
+            proxy_http_port: 10808,
+            ..Default::default()
+        }
+        .validate()
+        .is_err());
     }
 
     #[test]

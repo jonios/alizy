@@ -4,12 +4,15 @@ Alizy can run an **HTTP forward proxy** and a **SOCKS5 proxy** on this machine
 so that other devices on your Wi-Fi (a smart TV, a phone, a console) browse
 through *your* VPN connection. The HTTP proxy handles browsers and most apps;
 the SOCKS5 proxy carries any TCP traffic — including Telegram, SSH and other
-apps that don't speak HTTP.
+apps that don't speak HTTP — and UDP through SOCKS5 `UDP ASSOCIATE`.
 
-> **There is no password (phase A).** Anyone on your local network who reaches
-> these ports uses your VPN — and your bandwidth. Turn the proxy off when you
-> don't need it. This is a deliberate, documented trade-off; a credentials-based
-> variant is deferred (see [Roadmap](#roadmap)).
+> **No password by default.** Anyone on your local network who reaches these
+> ports uses your VPN — and your bandwidth. Turn on **Require a username and
+> password** (see [Authentication](#authentication)), or turn the proxy off when
+> you don't need it.
+
+The same two servers also implement proxy mode's local proxy on `127.0.0.1`
+(see [docs/MULTI_PROTOCOL.md](docs/MULTI_PROTOCOL.md) and the README).
 
 ## Using it
 
@@ -35,16 +38,19 @@ back after a reboot or a daemon restart because the setting is persisted in
 | ✅ HTTPS | via HTTP `CONNECT` (what TVs and browsers use for nearly everything) |
 | ✅ Plain HTTP | absolute-form requests are forwarded (`Connection: close`, one request per connection) |
 | ✅ SOCKS5 CONNECT | any TCP connection — Telegram (MTProto), SSH, IRC, raw TCP |
-| ✅ SOCKS5 domain resolution | ATYP 0x03; names are resolved by the daemon's tunnel-aware resolver |
-| ✅ DNS | resolved by the daemon's resolver, which points at the tunnel while connected — lookups don't leak |
-| ❌ UDP / QUIC | **TCP only.** Neither proxy carries UDP; SOCKS5 `UDP ASSOCIATE` is not implemented |
+| ✅ SOCKS5 domain resolution | ATYP 0x03; names are resolved the way the current egress resolves them (below) |
+| ✅ DNS | tunnel mode: the system resolver, which points at the tunnel while connected; proxy mode: through the tunnel (WireGuard) or on the SSH server — lookups don't leak |
+| ✅ SOCKS5 UDP ASSOCIATE | UDP datagrams relayed through the tunnel on the **same port number** as the SOCKS5 listener (UDP), so one firewall exception covers it. Fragmented datagrams (FRAG ≠ 0) are dropped |
+| ✅ Username/password | SOCKS5 RFC 1929 and HTTP `Proxy-Authorization: Basic` (407 otherwise) |
+| ❌ UDP over SSH tunnels | OpenSSH forwards TCP only; with an SSH tunnel, UDP ASSOCIATE answers "command not supported" |
+| ❌ HTTP proxy UDP | an HTTP proxy cannot carry UDP; use SOCKS5 |
 | ❌ Devices without a proxy setting | the device must let you configure a proxy (HTTP or SOCKS5) |
 | ❌ IPv6 destinations | listeners are IPv4; IPv6 is not relayed (phase A) |
 
-**Kill switch:** the firewall gains two extra rules while the proxies run —
-replies from each proxy's source port to the local network are accepted even
-when *Allow local network while protected* is off, because you turned this
-on deliberately. Everything else about the kill switch is unchanged: the
+**Kill switch:** the firewall gains extra rules while the proxies run —
+replies from each proxy's source port (TCP, and UDP for the SOCKS5 relay) to
+the local network are accepted even when *Allow local network while
+protected* is off, because you turned this on deliberately. Everything else about the kill switch is unchanged: the
 proxy's own outbound connections still have to go through the tunnel, so there
 is no leak path around it.
 
@@ -55,7 +61,7 @@ before Alizy ever sees it:
 
 ```bash
 sudo ufw allow from 192.168.1.0/24 to any port 8080 proto tcp comment 'alizy-lan-http'
-sudo ufw allow from 192.168.1.0/24 to any port 1080 proto tcp comment 'alizy-lan-socks5'
+sudo ufw allow from 192.168.1.0/24 to any port 1080 comment 'alizy-lan-socks5'   # TCP and UDP
 sudo ufw reload
 ```
 
@@ -67,24 +73,47 @@ firewall-cmd --reload`, or better, a trusted-zone source rule.
 refused immediately), 16 KiB of request headers, 10 s to resolve and connect,
 5 minutes of complete silence before a relay is closed.
 
+## Authentication
+
+*Require a username and password* applies to both proxies. The GUI sends the
+password to the daemon once; the daemon stores only `salt$sha256(salt ||
+password)` (16 random bytes of salt) in `/var/lib/alizy/state.json` (root,
+0600), never the password, and never reports either back — the status shows
+only the username. Changing the username needs a new password; leaving the
+password empty keeps the current one. Checks are constant-time.
+
+- **SOCKS5:** with credentials configured the server only accepts method 0x02
+  (username/password, RFC 1929); clients that offer only "no authentication"
+  are refused. A UDP association is accepted only from the IP address of a
+  client that holds an authenticated control connection, and ends when that
+  connection closes.
+- **HTTP:** every request must carry `Proxy-Authorization: Basic …`; otherwise
+  the proxy answers `407 Proxy Authentication Required`. Basic auth is
+  **unencrypted** on your LAN — anyone who can sniff it can reuse the login.
+  SOCKS5 has the same property. Treat this as access control on a trusted
+  network, not as encryption.
+
 ## How it reaches the internet
 
 Both proxies run **inside `alizyd`** (root, tokio):
 - HTTP: `crates/alizyd/src/lan_proxy.rs`
 - SOCKS5: `crates/alizyd/src/lan_socks.rs`
 
-Both follow the same listener pattern as the DNS forwarder
-(`crates/alizyd/src/socks_dns.rs`). Outbound connections are ordinary TCP
-sockets created by the daemon, so the kernel's policy routing applies to them
-exactly as it does to any other daemon traffic: while a tunnel is up they are
-carried by it, and with split tunnelling enabled a `Direct` rule applies to
-them like any other connection.
+Every outbound connection goes through the engine's current *egress*
+(`crates/alizyd/src/egress.rs`):
 
-Nothing in the packet path is special-cased — neither proxy needs its own
-mark, its own chain, or an exception for its *outbound* side. The only firewall
-changes are the inbound-reply rules described above, carried as
-`FirewallPlan::lan_proxy_port` and `lan_socks_port` (absent when the proxy is
-off, so every existing plan and its tag are byte-identical).
+| Mode / state | Egress |
+|---|---|
+| Tunnel mode | ordinary sockets: the kernel's policy routing carries them through the tunnel, and a split-tunnel `Direct` rule applies like to any connection |
+| Proxy mode, WireGuard connected | sockets marked `PROXY_MARK` (`0x4a5c`), which only the tunnel's routing table carries; names resolved over TCP through the tunnel's DNS |
+| Proxy mode, SSH connected | through `ssh -D` (names resolved on the server); TCP only |
+| Proxy mode, not connected | **refused** — never a direct connection |
+
+In tunnel mode nothing in the packet path is special-cased. In proxy mode the
+firewall adds a guard that rejects any `PROXY_MARK` packet leaving through an
+interface other than the tunnel. The inbound-reply rules described above are
+carried as `FirewallPlan::lan_proxy_port` and `lan_socks_port` (absent when the
+proxy is off, so plans without it keep their tag).
 
 Configuration flows through the ordinary IPC commands `get_lan_proxy` /
 `set_lan_proxy`; `SetLanProxy` is privileged (same list as `set_policy`), the
@@ -100,5 +129,3 @@ setting stays persisted so it retries on the next start.
   leaves via the physical interface while everything else still goes through
   the VPN. The intended first use: YouTube on the TV goes direct, the rest of
   the TV's traffic stays in the tunnel.
-* **Authentication:** a username/password on the listener (`Proxy-Authorization`),
-  so "no password" stops being a property of the feature.

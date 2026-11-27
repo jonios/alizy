@@ -1,7 +1,9 @@
 # Alizy — Architecture
 
-Alizy is a WireGuard desktop client split into **two processes with different
-privilege levels** plus a set of platform-neutral Rust crates.
+Alizy is a VPN desktop client (WireGuard and SSH tunnels today) split into **two
+processes with different privilege levels** plus a set of platform-neutral Rust
+crates. Protocols plug in as drivers behind one connection lifecycle; see
+[docs/MULTI_PROTOCOL.md](docs/MULTI_PROTOCOL.md).
 
 ```
 ┌──────────────────────────── user session (unprivileged) ───────────────────────────┐
@@ -18,9 +20,10 @@ privilege levels** plus a set of platform-neutral Rust crates.
 ┌────────┼──────────────────────────── root (systemd service) ───────────────────────┐
 │  alizyd (crates/alizyd)                                                              │
 │    system_service ── socket server, authorization, request validation               │
-│    connection_manager ── state machine, supervisor, auto-reconnect                  │
-│    platform::linux                                                                  │
+│    connection_manager ── one lifecycle for all protocols, supervisor, reconnect      │
+│    driver::{wireguard, ssh} ── protocol adapters (TunnelDriver)                     │
 │      wireguard_engine  (ip link / wg setconf via stdin, no temp files)              │
+│    platform::linux                                                                  │
 │      routing_manager   (iproute2, policy routing with owned rule priorities)        │
 │      dns_manager       (systemd-resolved per-link DNS; resolv.conf fallback+backup) │
 │      firewall_manager  (nftables: one owned table `inet alizy`, atomic replace)     │
@@ -51,13 +54,15 @@ without root and without Tauri.
 |---|---|
 | profile_manager | `alizy-core::config`, `alizy-core::profile`, `alizy-store::profiles`, `src-tauri/src/commands/profiles.rs` |
 | connection_manager | `alizy-core::state`, `alizyd::engine` |
-| wireguard_engine | `alizyd::linux::wireguard` |
+| protocol registry (config model, pure per-protocol planning) | `alizy-core::protocol` |
+| protocol adapters | `alizyd::driver` (`TunnelDriver`), `alizyd::driver::{wireguard, ssh}` |
+| wireguard_engine | `alizyd::driver::wireguard`, `alizyd::linux::wireguard` |
 | network_manager | `alizyd::linux::netmon` |
 | firewall_manager | `alizy-core::firewall` (render), `alizyd::linux::firewall` (apply/verify) |
 | kill_switch | `alizyd::engine` (policy → plan), persisted in `alizyd::persist` |
 | dns_manager | `alizy-core::dns`, `alizyd::linux::dns` |
 | routing_manager | `alizy-core::routing`, `alizyd::linux::routing` |
-| platform_adapter | `alizy-core::platform` trait, `alizyd::linux` impl |
+| platform_adapter (firewall, routes, DNS for any tunnel) | `alizy-core::platform` trait, `alizyd::engine::Backend`, `alizyd::linux` impl |
 | system_service | `alizyd::server`, `alizyd::auth`, packaging/linux |
 | settings_manager | `alizy-store::settings`, `src-tauri/src/commands/settings.rs` |
 | statistics_manager | `alizy-store::history`, `src-tauri/src/poller.rs` |
@@ -104,6 +109,7 @@ routing plans as WireGuard; only the tunnel itself differs.
 | Profile model, validation, fingerprint | `alizy-core::ssh` | — |
 | Firewall: server TCP exception, SOCKS-port `skuid` rules, UDP reject | `alizy-core::firewall` (`TunnelRules`) | — |
 | Forwarder upstreams, `127.77.0.1` DNS plan | `alizy-core::routing` | — |
+| Protocol driver (host-key decision, DNS upstreams, firewall exceptions) | `alizyd::driver::ssh` | root (in-daemon) |
 | `ssh -N -D 127.0.0.1:<port>` (password auth, pinned host key) | `alizyd::linux::ssh` | alizy-ssh |
 | `ssh-keyscan` (trust on first use) | `alizyd::linux::ssh::keyscan` | alizy-ssh |
 | `badvpn-tun2socks` (TUN `alizy0` ↔ SOCKS) | `alizyd::linux::ssh` | alizy-ssh |
@@ -112,8 +118,8 @@ routing plans as WireGuard; only the tunnel itself differs.
 | Bring-up cancellation (lock-free; fired by disconnect/connect) | `alizyd::cancel` | — |
 | Password storage | `alizy-store` (keyring / 0600 file, never SQLite) | user |
 
-Bring-up order: firewall for the new tunnel → (unknown key: keyscan, stop and
-ask the user) → known_hosts → TUN owned by alizy-ssh → askpass → ssh →
+Bring-up order (the generic lifecycle in docs/MULTI_PROTOCOL.md §3): firewall
+for the new tunnel → (unknown key: keyscan, stop and ask the user) → known_hosts → TUN owned by alizy-ssh → askpass → ssh →
 readiness (a SOCKS5 greeting answered by a listener owned by alizy-ssh) →
 tun2socks → DNS forwarder → routes → system DNS. The bring-up holds the engine
 lock; `disconnect`/`connect` cancel it through `alizyd::cancel` before waiting
@@ -133,7 +139,8 @@ for the lock, so they complete within about a second. Status reads never wait.
 ## Platform adapters
 
 The `PlatformAdapter` trait in `alizy-core::platform` describes capabilities
-(tunnel up/down, firewall apply/verify, DNS). Only Linux is implemented.
+(firewall apply/verify, routes and DNS for a tunnel interface, teardown); it is
+protocol-neutral. Only Linux is implemented.
 Windows (WireGuardNT + embeddable service + WFP) and macOS (WireGuardKit +
 NEPacketTunnelProvider) are **documented, not implemented** — see
 `docs/PLATFORMS.md`. The daemon binary on those targets exits with an explicit
