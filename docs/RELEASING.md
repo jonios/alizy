@@ -120,3 +120,11 @@ that, then push `PKGBUILD`, `.SRCINFO` and `alizyd.install` to
 
 `packaging/arch/PKGBUILD` packages your local working tree (`makepkg -si`) for
 development; keep its dependency lists in sync with the AUR one.
+
+## Commit attribution
+
+Commits and PRs carry no AI co-author or "Generated with" lines. Three guards:
+`.claude/settings.json` turns off Claude Code's attribution, the
+`.githooks/commit-msg` hook rejects such lines locally (enable once per clone
+with `git config core.hooksPath .githooks`), and the CI `attribution` job checks
+the whole history with `scripts/check-attribution.sh --range HEAD`.
