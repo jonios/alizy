@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
 ### New
 - **Proxy mode** (Network → Connection mode). The tunnel comes up without touching
