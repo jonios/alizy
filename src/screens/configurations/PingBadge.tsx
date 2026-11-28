@@ -5,8 +5,8 @@ import { useStatus } from "../../store/status";
 import { t } from "../../i18n";
 
 /** Colour thresholds for the round trip: green < 80 ms < yellow < 250 ms. */
-const FAST_MS = 80;
-const OK_MS = 250;
+export const FAST_MS = 80;
+export const OK_MS = 250;
 
 function failureHint(error: string | null, killSwitch: boolean): string {
   switch (error) {

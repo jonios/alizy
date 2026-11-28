@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { ScreenBody, ScreenHeader } from "../../components/ScreenHeader";
+import { KillSwitchConfirm } from "../../components/KillSwitchConfirm";
 import { Card, CardHeader } from "../../components/ui/card";
 import { Switch } from "../../components/ui/switch";
 import { Button } from "../../components/ui/button";
@@ -314,35 +315,7 @@ export function NetworkSettings() {
         )}
       </ScreenBody>
 
-      <ConfirmDialog
-        open={ksDialog === "on"}
-        onOpenChange={(o) => !o && setKsDialog(null)}
-        icon={<ShieldCheck />}
-        title={t("Turn on the kill switch?")}
-        description={t(
-          "All internet traffic that doesn’t go through the VPN will be blocked by the system firewall. This stays in effect even when the Alizy window is closed, after a crash, and while disconnected — you’ll have no internet until you connect or turn this off.",
-        )}
-        confirmLabel={t("Turn on kill switch")}
-        onConfirm={async () => {
-          if (!policy) return;
-          return (await save({ ...policy, kill_switch: true })) ? undefined : false;
-        }}
-      >
-        {policy && !policy.allow_lan && <p className="text-xs text-muted">{t("Local network access is currently blocked too. You can allow it below.")}</p>}
-      </ConfirmDialog>
-      <ConfirmDialog
-        open={ksDialog === "off"}
-        onOpenChange={(o) => !o && setKsDialog(null)}
-        destructive
-        icon={<ShieldOff />}
-        title={t("Turn off the kill switch?")}
-        description={t("If the VPN connection drops, your traffic will immediately flow through your regular connection and may expose your real IP address.")}
-        confirmLabel={t("Turn off")}
-        onConfirm={async () => {
-          if (!policy) return;
-          return (await save({ ...policy, kill_switch: false })) ? undefined : false;
-        }}
-      />
+      <KillSwitchConfirm which={ksDialog} onClose={() => setKsDialog(null)} />
       <ConfirmDialog
         open={modeDialog !== null}
         onOpenChange={(o) => !o && setModeDialog(null)}

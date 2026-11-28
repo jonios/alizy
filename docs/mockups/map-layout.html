@@ -1,0 +1,621 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Alizy Map Layout</title>
+<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/topojson-client@3.1.0/dist/topojson-client.min.js"></script>
+<style>
+  :root {
+    --bg: #090b10;
+    --panel: #0f1218;
+    --panel-2: #151922;
+    --panel-3: #1b2030;
+    --line: #1f2533;
+    --fg: #e7eaf2;
+    --muted: #7c8599;
+    --faint: #4c5466;
+    --accent: #7c93ff;
+    --accent-2: #b48cff;
+    --accent-soft: rgb(124 147 255 / 0.12);
+    --ok: #5ee6a0;
+    --warn: #f5b454;
+    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: #040507; }
+  body { font: 13px/1.4 Inter, ui-sans-serif, system-ui, sans-serif; color: var(--fg); display: grid; place-items: center; }
+  button { font: inherit; }
+  .win {
+    width: min(1320px, 100vw); height: min(820px, 100vh);
+    background: var(--bg); border: 1px solid var(--line); border-radius: 16px;
+    display: flex; overflow: hidden; position: relative;
+  }
+
+  /* ───────── config list ───────── */
+  .list { width: 284px; flex: none; background: var(--panel); border-right: 1px solid var(--line); display: flex; flex-direction: column; }
+  .brand { padding: 18px 18px 14px; display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: .2px; }
+  .brand .mark { width: 26px; height: 26px; border-radius: 8px; background: conic-gradient(from 210deg, var(--accent), var(--accent-2), var(--accent)); position: relative; }
+  .brand .mark::after { content: ""; position: absolute; inset: 7px; border-radius: 50%; background: var(--panel); }
+  .brand .count { margin-left: auto; font: 11px var(--mono); color: var(--faint); font-weight: 400; }
+  .search { margin: 0 14px 8px; display: flex; align-items: center; gap: 8px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; color: var(--muted); }
+  .search input { all: unset; flex: 1; color: var(--fg); }
+  .search kbd { font: 10px var(--mono); color: var(--faint); border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; }
+  .chips { display: flex; gap: 6px; padding: 4px 14px 10px; }
+  .chip { all: unset; cursor: pointer; font-size: 11px; color: var(--muted); padding: 4px 9px; border-radius: 99px; border: 1px solid var(--line); }
+  .chip.on { color: var(--fg); background: var(--panel-3); border-color: var(--panel-3); }
+  .rows { overflow: auto; flex: 1; padding: 2px 8px 12px; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+  .row { display: flex; align-items: center; gap: 11px; padding: 9px 10px; border-radius: 11px; cursor: pointer; position: relative; transition: background .15s; }
+  .row:hover { background: var(--panel-2); }
+  .row.sel { background: var(--accent-soft); }
+  .row.sel::before { content: ""; position: absolute; left: 0; top: 12px; bottom: 12px; width: 2px; border-radius: 2px; background: var(--accent); }
+  .flag { width: 30px; height: 30px; border-radius: 50%; object-fit: cover; flex: none; box-shadow: 0 0 0 2px var(--panel), 0 0 0 3px var(--line); }
+  .row .t { flex: 1; min-width: 0; }
+  .row .l1 { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .row .country { font-weight: 600; white-space: nowrap; }
+  .row .ip { font: 11px var(--mono); color: var(--muted); }
+  .row .l2 { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 2px; }
+  .row .name { color: var(--faint); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bars { display: flex; gap: 2px; align-items: end; height: 10px; flex: none; }
+  .bars i { width: 3px; border-radius: 1px; background: var(--line); }
+  .bars i:nth-child(1) { height: 4px; } .bars i:nth-child(2) { height: 7px; } .bars i:nth-child(3) { height: 10px; }
+  .bars.q3 i { background: var(--ok); } .bars.q2 i:nth-child(-n+2) { background: var(--warn); } .bars.q1 i:nth-child(1) { background: #f27373; }
+  .row .live { position: absolute; right: 10px; top: 10px; }
+  .pulse { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 0 rgb(94 230 160 / .6); animation: pulse 1.8s infinite; display: inline-block; }
+  @keyframes pulse { 70% { box-shadow: 0 0 0 7px rgb(94 230 160 / 0); } 100% { box-shadow: 0 0 0 0 rgb(94 230 160 / 0); } }
+  .list-foot { border-top: 1px solid var(--line); padding: 10px 14px; display: flex; gap: 8px; }
+  .ghost { all: unset; cursor: pointer; flex: 1; text-align: center; padding: 8px; border-radius: 9px; background: var(--panel-2); color: var(--muted); font-size: 12px; }
+  .ghost:hover { color: var(--fg); }
+
+  /* ───────── stage ───────── */
+  .stage { flex: 1; position: relative; min-width: 0; overflow: hidden;
+    background:
+      radial-gradient(800px 420px at 55% 45%, rgb(124 147 255 / .07), transparent 70%),
+      var(--bg); }
+  #dots, #overlay { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #overlay { pointer-events: none; }
+  #overlay .hit { pointer-events: all; cursor: pointer; }
+
+  .pin .halo { fill: var(--accent); opacity: .12; }
+  .pin .ring { fill: none; stroke: var(--accent); stroke-width: 1; opacity: .5; }
+  .pin .core { fill: var(--panel); stroke: var(--accent); stroke-width: 1.5; }
+  .pin text { fill: var(--fg); font: 600 11px Inter, sans-serif; text-anchor: middle; dominant-baseline: central; }
+  .pin.active .core { fill: var(--accent); }
+  .pin.active text { fill: #0a0c12; }
+  .pin.live .ring { animation: ripple 2s ease-out infinite; transform-box: fill-box; transform-origin: center; }
+  @keyframes ripple { from { transform: scale(1); opacity: .7; } to { transform: scale(2.6); opacity: 0; } }
+  .home .core { fill: var(--fg); }
+  .home .ring { fill: none; stroke: var(--fg); opacity: .3; }
+  .home-label { fill: var(--muted); font: 500 10px Inter, sans-serif; letter-spacing: .6px; }
+  .route { fill: none; stroke: url(#routeGrad); stroke-width: 1.6; stroke-dasharray: 2 6; stroke-linecap: round; }
+  .route.live { stroke-dasharray: none; stroke-width: 1.8; }
+  .comet { fill: #fff; filter: drop-shadow(0 0 6px var(--accent)); }
+
+  .tip { position: absolute; pointer-events: none; display: none; align-items: center; gap: 8px; background: rgb(21 25 34 / .92); backdrop-filter: blur(8px); border: 1px solid var(--line); border-radius: 9px; padding: 6px 10px 6px 6px; font-size: 12px; white-space: nowrap; z-index: 5; }
+  .tip img { width: 20px; height: 20px; border-radius: 50%; object-fit: cover; }
+  .tip span { color: var(--faint); font-size: 11px; }
+
+  .pick { position: absolute; background: rgb(21 25 34 / .96); backdrop-filter: blur(10px); border: 1px solid var(--line); border-radius: 12px; padding: 5px; min-width: 210px; box-shadow: 0 16px 40px rgb(0 0 0 / .5); display: none; z-index: 6; }
+  .pick header { display: flex; align-items: center; gap: 8px; padding: 6px 8px 8px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .6px; }
+  .pick header img { width: 16px; height: 16px; border-radius: 50%; }
+  .pick div { padding: 8px 9px; border-radius: 8px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; gap: 14px; }
+  .pick div:hover { background: var(--accent-soft); }
+  .pick span { color: var(--muted); font: 11px var(--mono); }
+
+  /* dock */
+  .dock { position: absolute; top: 16px; left: 50%; transform: translateX(-50%); display: flex; gap: 2px; padding: 4px; background: rgb(15 18 24 / .8); backdrop-filter: blur(14px); border: 1px solid var(--line); border-radius: 14px; z-index: 4; box-shadow: 0 10px 30px rgb(0 0 0 / .35); }
+  .dock .slider { position: absolute; top: 4px; bottom: 4px; border-radius: 10px; background: var(--panel-3); transition: left .25s cubic-bezier(.3,.7,.2,1), width .25s cubic-bezier(.3,.7,.2,1); }
+  .dock button { all: unset; position: relative; cursor: pointer; display: flex; align-items: center; gap: 7px; padding: 8px 13px; border-radius: 10px; color: var(--muted); font-weight: 500; transition: color .2s; }
+  .dock button:hover, .dock button.on { color: var(--fg); }
+  .dock button.on svg { color: var(--accent); }
+  .dock svg { width: 15px; height: 15px; }
+
+  /* floating map chrome */
+  .zoom { position: absolute; right: 16px; bottom: 16px; display: flex; flex-direction: column; background: rgb(15 18 24 / .8); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; z-index: 3; }
+  .zoom button { all: unset; cursor: pointer; width: 30px; height: 30px; display: grid; place-items: center; color: var(--muted); }
+  .zoom button + button { border-top: 1px solid var(--line); }
+  .status-pill { position: absolute; left: 16px; bottom: 16px; display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: rgb(15 18 24 / .8); backdrop-filter: blur(10px); border: 1px solid var(--line); border-radius: 12px; z-index: 3; font-size: 12px; color: var(--muted); }
+  .status-pill b { color: var(--fg); font-weight: 600; }
+  .status-pill .sep { width: 1px; height: 14px; background: var(--line); }
+  .status-pill .mono { font-family: var(--mono); font-size: 11px; }
+  .shield { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
+  .shield.on { background: var(--ok); box-shadow: 0 0 10px var(--ok); }
+
+  .placeholder { position: absolute; inset: 76px 24px 24px; border: 1px dashed var(--line); border-radius: 14px; display: none; place-items: center; color: var(--faint); }
+
+  /* ───────── detail panel ───────── */
+  .detail { width: 0; flex: none; overflow: hidden; transition: width .3s cubic-bezier(.3,.7,.2,1); background: var(--panel); border-left: 1px solid var(--line); }
+  .detail.open { width: 330px; }
+  .detail-in { width: 330px; height: 100%; overflow: auto; padding: 16px 18px 18px; display: flex; flex-direction: column; gap: 14px; scrollbar-width: none; }
+
+  .route-chip { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); }
+  .route-chip img { width: 16px; height: 16px; border-radius: 50%; object-fit: cover; }
+  .route-chip .arr { color: var(--faint); letter-spacing: -2px; }
+  .route-chip .arr.live { color: var(--accent); animation: flow 1.2s linear infinite; }
+  @keyframes flow { 50% { opacity: .35; } }
+  .x { all: unset; margin-left: auto; cursor: pointer; color: var(--faint); width: 24px; height: 24px; display: grid; place-items: center; border-radius: 7px; }
+  .x:hover { background: var(--panel-2); color: var(--fg); }
+
+  .hero { position: relative; border-radius: 16px; padding: 16px; overflow: hidden; background: var(--panel-2); border: 1px solid var(--line); }
+  .hero .bgflag { position: absolute; right: -40px; top: -40px; width: 170px; height: 170px; border-radius: 50%; object-fit: cover; opacity: .16; filter: blur(14px) saturate(1.4); -webkit-mask: radial-gradient(circle, #000 35%, transparent 70%); mask: radial-gradient(circle, #000 35%, transparent 70%); }
+  .hero .country { font-size: 20px; font-weight: 650; letter-spacing: -.2px; }
+  .hero .ip { font: 12px var(--mono); color: var(--muted); margin-top: 2px; display: flex; align-items: center; gap: 6px; }
+  .hero .ip button { all: unset; cursor: pointer; color: var(--faint); font-size: 11px; }
+  .hero .meta { display: flex; gap: 6px; margin-top: 12px; flex-wrap: wrap; }
+  .tag { font-size: 11px; padding: 3px 8px; border-radius: 6px; background: var(--panel-3); color: var(--muted); }
+  .tag.proto { color: var(--accent); background: var(--accent-soft); }
+
+  .power-wrap { display: grid; place-items: center; padding: 6px 0 0; position: relative; }
+  .power-ring { position: absolute; width: 168px; height: 168px; }
+  .power-ring .track { fill: none; stroke: var(--line); stroke-width: 2; }
+  .power-ring .prog { fill: none; stroke: url(#ringGrad); stroke-width: 2.5; stroke-linecap: round; stroke-dasharray: 60 468; transform-origin: center; opacity: 0; transition: opacity .3s; }
+  .connecting .power-ring .prog { opacity: 1; animation: spin 1s linear infinite; }
+  .on .power-ring .prog { opacity: 1; stroke-dasharray: 528 0; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .power { all: unset; cursor: pointer; width: 128px; height: 128px; border-radius: 50%; display: grid; place-items: center; align-content: center; gap: 4px; background: radial-gradient(circle at 50% 35%, var(--panel-3), var(--panel-2)); border: 1px solid var(--line); color: var(--muted); transition: all .35s; position: relative; margin: 20px 0; }
+  .power svg { width: 30px; height: 30px; }
+  .power small { font-size: 11px; font-weight: 600; letter-spacing: .4px; }
+  .on .power { background: radial-gradient(circle at 50% 30%, #9fb0ff, var(--accent) 60%, #6a7ff0); color: #0a0c12; border-color: transparent; box-shadow: 0 0 60px rgb(124 147 255 / .35), inset 0 -8px 20px rgb(0 0 0 / .15); }
+  .state { text-align: center; font-size: 12px; color: var(--muted); margin-top: -6px; }
+  .state b { color: var(--ok); font-weight: 600; }
+
+  .card { background: var(--panel-2); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; }
+  .k { color: var(--faint); font-size: 11px; }
+  .big { font-size: 26px; font-weight: 650; font-variant-numeric: tabular-nums; letter-spacing: -.5px; }
+  .timecard { display: flex; justify-content: space-between; align-items: end; }
+  .timecard .since { font-size: 11px; color: var(--faint); text-align: right; }
+
+  .speed-head { display: flex; justify-content: space-between; align-items: baseline; }
+  .speed-vals { display: flex; gap: 14px; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .speed-vals .dn { color: var(--accent); } .speed-vals .up { color: var(--accent-2); }
+  .speed-vals small { color: var(--faint); font-weight: 500; font-size: 10px; }
+  #spark { width: 100%; height: 52px; display: block; margin-top: 8px; }
+  .usage { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
+  .usage .v { font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .usage .v small { color: var(--muted); font-size: 11px; font-weight: 500; }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--line); border-radius: 14px; overflow: hidden; border: 1px solid var(--line); }
+  .grid2 > div { background: var(--panel-2); padding: 10px 12px; }
+  .grid2 .v { font: 12.5px var(--mono); margin-top: 3px; display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .ok-txt { color: var(--ok); }
+
+  .ks { display: flex; align-items: center; gap: 12px; }
+  .ks .ico { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; background: var(--panel-3); color: var(--muted); flex: none; transition: all .2s; }
+  .ks.on .ico { background: rgb(94 230 160 / .12); color: var(--ok); }
+  .ks .k2 { font-weight: 600; }
+  .ks .s { color: var(--faint); font-size: 11px; }
+  .tog { all: unset; cursor: pointer; margin-left: auto; width: 38px; height: 22px; border-radius: 99px; background: var(--panel-3); position: relative; transition: background .2s; flex: none; }
+  .tog::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: var(--muted); transition: all .2s; }
+  .ks.on .tog { background: var(--ok); }
+  .ks.on .tog::after { left: 19px; background: #0a0c12; }
+</style>
+</head>
+<body>
+<div class="win">
+  <!-- ── configs ── -->
+  <aside class="list">
+    <div class="brand"><div class="mark"></div>alizy<span class="count" id="count"></span></div>
+    <label class="search">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      <input id="q" placeholder="Search">
+      <kbd>/</kbd>
+    </label>
+    <div class="chips" id="chips">
+      <button class="chip on" data-f="all">All</button>
+      <button class="chip" data-f="wg">WireGuard</button>
+      <button class="chip" data-f="ssh">SSH</button>
+      <button class="chip" data-f="fav">★</button>
+    </div>
+    <div class="rows" id="rows"></div>
+    <div class="list-foot">
+      <button class="ghost">+ Import</button>
+      <button class="ghost">Paste</button>
+    </div>
+  </aside>
+
+  <!-- ── map ── -->
+  <section class="stage" id="stage">
+    <nav class="dock" id="dock">
+      <span class="slider" id="slider"></span>
+      <button data-v="map" class="on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg>Map</button>
+      <button data-v="configs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="6" rx="2"/><rect x="4" y="14" width="16" height="6" rx="2"/></svg>Configs</button>
+      <button data-v="split"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 3v6a6 6 0 0 0 6 6 6 6 0 0 1 6 6M18 3v6a6 6 0 0 1-3 5.2"/></svg>Split</button>
+      <button data-v="logs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h10"/></svg>Logs</button>
+      <button data-v="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>Settings</button>
+    </nav>
+    <canvas id="dots"></canvas>
+    <svg id="overlay">
+      <defs>
+        <linearGradient id="routeGrad" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0" stop-color="#e7eaf2" stop-opacity=".5"/>
+          <stop offset="1" stop-color="#7c93ff"/>
+        </linearGradient>
+      </defs>
+      <g id="routeLayer"></g>
+      <g id="pinLayer"></g>
+    </svg>
+    <div class="tip" id="tip"></div>
+    <div class="pick" id="pick"></div>
+    <div class="placeholder" id="ph"></div>
+
+    <div class="status-pill" id="pill">
+      <span class="shield" id="pillDot"></span>
+      <b id="pillState">Unprotected</b>
+      <span class="sep"></span>
+      <span class="mono" id="pillIp">5.120.44.17</span>
+    </div>
+    <div class="zoom"><button>+</button><button>−</button></div>
+  </section>
+
+  <!-- ── detail ── -->
+  <aside class="detail" id="detail">
+    <div class="detail-in" id="dIn">
+      <div class="route-chip">
+        <span>You</span><img src="https://flagcdn.com/w40/ir.png" alt="">
+        <span class="arr" id="arr">›››</span>
+        <img id="rFlag" alt=""><span id="rCity"></span>
+        <button class="x" id="close" title="Close">✕</button>
+      </div>
+
+      <div class="hero">
+        <img class="bgflag" id="bgFlag" alt="">
+        <div class="country" id="dCountry"></div>
+        <div class="ip"><span id="dIp"></span><button title="Copy">⧉</button></div>
+        <div class="meta">
+          <span class="tag" id="dName"></span>
+          <span class="tag proto" id="dProto"></span>
+          <span class="tag" id="dPort"></span>
+        </div>
+      </div>
+
+      <div class="power-wrap" id="pw">
+        <svg class="power-ring" viewBox="0 0 168 168">
+          <defs><linearGradient id="ringGrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#7c93ff"/><stop offset="1" stop-color="#b48cff"/></linearGradient></defs>
+          <circle class="track" cx="84" cy="84" r="82"/>
+          <circle class="prog" cx="84" cy="84" r="82" transform="rotate(-90 84 84)"/>
+        </svg>
+        <button class="power" id="power">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 3v8"/><path d="M6.3 7.5a8 8 0 1 0 11.4 0"/></svg>
+          <small id="pLabel">CONNECT</small>
+        </button>
+      </div>
+      <div class="state" id="state">Not connected</div>
+
+      <div class="card timecard">
+        <div><div class="k">Session</div><div class="big" id="time">00:00:00</div></div>
+        <div class="since" id="since">—</div>
+      </div>
+
+      <div class="card">
+        <div class="speed-head">
+          <div class="k">Live</div>
+          <div class="speed-vals"><span class="dn">↓ <span id="sDn">0.0</span> <small>MB/s</small></span><span class="up">↑ <span id="sUp">0.0</span> <small>MB/s</small></span></div>
+        </div>
+        <canvas id="spark"></canvas>
+        <div class="usage">
+          <div><div class="k">Downloaded</div><div class="v" id="rx">0 <small>MB</small></div></div>
+          <div><div class="k">Uploaded</div><div class="v" id="tx">0 <small>MB</small></div></div>
+        </div>
+      </div>
+
+      <div class="grid2">
+        <div><div class="k">Tunnel IP</div><div class="v" id="tIp">—</div></div>
+        <div><div class="k">Latency</div><div class="v"><span id="lat">—</span><span class="bars" id="latBars"><i></i><i></i><i></i></span></div></div>
+        <div><div class="k">Handshake</div><div class="v" id="hs">—</div></div>
+        <div><div class="k">DNS</div><div class="v" id="dns">—</div></div>
+      </div>
+
+      <div class="card ks on" id="ks">
+        <div class="ico"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6l-8-3z"/><path d="m9 12 2 2 4-4"/></svg></div>
+        <div><div class="k2">Full protection</div><div class="s">Kill switch</div></div>
+        <button class="tog" id="tog"></button>
+      </div>
+    </div>
+  </aside>
+</div>
+
+<script>
+const HOME = { lon: 51.39, lat: 35.69, cc: "ir", ip: "5.120.44.17" };
+const CONFIGS = [
+  { id: 1,  cc: "de", country: "Germany",       city: "Falkenstein", iso: 276, ip: "116.203.41.9",    name: "hetzner-fsn",  proto: "WireGuard", port: 51820, ping: 92,  fav: true,  lon: 12.4, lat: 50.5 },
+  { id: 2,  cc: "de", country: "Germany",       city: "Frankfurt",   iso: 276, ip: "49.12.88.140",    name: "office-ssh",   proto: "SSH",       port: 22,    ping: 88,  lon: 8.7,  lat: 50.1 },
+  { id: 3,  cc: "nl", country: "Netherlands",   city: "Amsterdam",   iso: 528, ip: "185.107.56.2",    name: "ams-wg",       proto: "WireGuard", port: 51820, ping: 104, lon: 4.9,  lat: 52.4 },
+  { id: 4,  cc: "fi", country: "Finland",       city: "Helsinki",    iso: 246, ip: "65.21.144.77",    name: "hel1-backup",  proto: "WireGuard", port: 443,   ping: 118, lon: 24.9, lat: 60.2 },
+  { id: 5,  cc: "tr", country: "Türkiye",       city: "Istanbul",    iso: 792, ip: "94.102.3.18",     name: "ist-fast",     proto: "WireGuard", port: 51820, ping: 41,  fav: true, lon: 29.0, lat: 41.0 },
+  { id: 6,  cc: "us", country: "United States", city: "Columbus",    iso: 840, ip: "103.107.196.204", name: "ohio-main",    proto: "WireGuard", port: 51820, ping: 212, lon: -83.0, lat: 40.0 },
+  { id: 7,  cc: "us", country: "United States", city: "Los Angeles", iso: 840, ip: "45.77.10.3",      name: "la-gaming",    proto: "WireGuard", port: 51820, ping: 268, lon: -118.2, lat: 34.1 },
+  { id: 8,  cc: "us", country: "United States", city: "New York",    iso: 840, ip: "149.28.66.201",   name: "nyc-ssh",      proto: "SSH",       port: 2222,  ping: 201, lon: -74.0, lat: 40.7 },
+  { id: 9,  cc: "ae", country: "UAE",           city: "Dubai",       iso: 784, ip: "176.97.210.5",    name: "dxb-wg",       proto: "WireGuard", port: 51820, ping: 36,  lon: 55.3, lat: 25.2 },
+  { id: 10, cc: "sg", country: "Singapore",     city: "Singapore",   iso: 702, ip: "139.180.130.9",   name: "sg-relay",     proto: "SSH",       port: 22,    ping: 174, lon: 103.8, lat: 1.35 },
+  { id: 11, cc: "ca", country: "Canada",        city: "Beauharnois", iso: 124, ip: "158.69.12.44",    name: "ovh-bhs",      proto: "WireGuard", port: 51820, ping: 196, lon: -73.9, lat: 45.3 },
+  { id: 12, cc: "jp", country: "Japan",         city: "Tokyo",       iso: 392, ip: "45.32.21.98",     name: "tyo-wg",       proto: "WireGuard", port: 51820, ping: 231, lon: 139.7, lat: 35.7 },
+];
+const flag = (cc, w = 80) => `https://flagcdn.com/w${w}/${cc}.png`;
+const $ = id => document.getElementById(id);
+const q = n => n < 80 ? 3 : n < 180 ? 2 : 1;
+
+let selected = null, connected = null, connecting = false, t0 = 0, rx = 0, tx = 0, filter = "all", hoverIso = null;
+const hist = Array.from({ length: 48 }, () => [0, 0]);
+
+/* ───────── list ───────── */
+function visible() {
+  const term = $("q").value.toLowerCase();
+  return CONFIGS.filter(c =>
+    (filter === "all" || (filter === "wg" && c.proto === "WireGuard") || (filter === "ssh" && c.proto === "SSH") || (filter === "fav" && c.fav)) &&
+    (!term || (c.country + c.name + c.ip).toLowerCase().includes(term)));
+}
+function renderRows() {
+  const list = visible();
+  $("count").textContent = `${list.length}/${CONFIGS.length}`;
+  $("rows").innerHTML = list.map(c => `
+    <div class="row ${selected?.id === c.id ? "sel" : ""}" data-id="${c.id}">
+      <img class="flag" src="${flag(c.cc)}" alt="">
+      <div class="t">
+        <div class="l1"><span class="country">${c.country}</span><span class="ip">${c.ip}</span></div>
+        <div class="l2"><span class="name">${c.name}</span>${connected?.id === c.id ? '<span class="pulse"></span>' : `<span class="bars q${q(c.ping)}"><i></i><i></i><i></i></span>`}</div>
+      </div>
+    </div>`).join("");
+}
+$("rows").addEventListener("click", e => { const r = e.target.closest(".row"); if (r) select(CONFIGS.find(c => c.id == r.dataset.id)); });
+$("q").addEventListener("input", renderRows);
+$("chips").addEventListener("click", e => {
+  const b = e.target.closest(".chip"); if (!b) return;
+  filter = b.dataset.f; document.querySelectorAll(".chip").forEach(x => x.classList.toggle("on", x === b)); renderRows();
+});
+
+/* ───────── dotted map ─────────
+   Countries are painted once into a hidden canvas, each in a colour that
+   encodes its index; the visible map samples that canvas on a grid and
+   draws one dot per land cell. The same lookup answers hover and click. */
+const stage = $("stage"), dots = $("dots"), ctx = dots.getContext("2d");
+const hidden = document.createElement("canvas"), hctx = hidden.getContext("2d", { willReadFrequently: true });
+let world, projection, cells = [], W = 0, H = 0, DPR = 1, idx = null;
+const STEP = 7;
+const byIso = d3.group(CONFIGS, c => c.iso);
+
+d3.json("https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json").then(topo => {
+  world = topojson.feature(topo, topo.objects.countries).features.filter(f => f.id !== "010");
+  layout();
+  new ResizeObserver(layout).observe(stage);
+});
+
+function layout() {
+  if (!world) return;
+  const r = stage.getBoundingClientRect();
+  W = r.width; H = r.height; DPR = devicePixelRatio || 1;
+  dots.width = W * DPR; dots.height = H * DPR;
+  hidden.width = W; hidden.height = H;
+  projection = d3.geoNaturalEarth1().fitExtent([[24, 76], [W - 24, H - 60]], { type: "FeatureCollection", features: world });
+  const path = d3.geoPath(projection, hctx);
+  hctx.clearRect(0, 0, W, H);
+  world.forEach((f, i) => { hctx.beginPath(); path(f); hctx.fillStyle = `rgb(${(i + 1) & 255},${(i + 1) >> 8},0)`; hctx.fill(); });
+  const data = hctx.getImageData(0, 0, W, H).data;
+  idx = (x, y) => { x |= 0; y |= 0; if (x < 0 || y < 0 || x >= W || y >= H) return -1; const o = (y * W + x) * 4; return data[o + 3] > 200 ? data[o] + (data[o + 1] << 8) - 1 : -1; };
+  cells = [];
+  for (let y = STEP / 2; y < H; y += STEP) for (let x = STEP / 2; x < W; x += STEP) {
+    const i = idx(x, y); if (i >= 0) cells.push([x, y, +world[i].id]);
+  }
+  placePins(); paintDots(); drawPins(); drawRoute();
+}
+
+function paintDots() {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  const selIso = selected?.iso, liveIso = connected?.iso;
+  for (const [x, y, iso] of cells) {
+    const has = byIso.has(iso);
+    let col = "#222838", r = 1.6;
+    if (has) { col = "#2c3758"; r = 1.9; }
+    if (iso === hoverIso && has) { col = "#46568a"; r = 2.1; }
+    if (iso === selIso) { col = "#6f84f0"; r = 2.2; }
+    if (iso === liveIso && iso === selIso) { col = "#8ea0ff"; }
+    ctx.fillStyle = col; ctx.beginPath(); ctx.arc(x, y, r, 0, 6.283); ctx.fill();
+  }
+}
+
+// one pin per country, sitting on the mean of its configs' cities; pins
+// that would overlap (dense Europe) are pushed apart a little
+let pins = new Map();
+function placePins() {
+  pins = new Map();
+  const pts = [...byIso.values()].map(list => {
+    const p = list.map(c => projection([c.lon, c.lat]));
+    return { iso: list[0].iso, x: d3.mean(p, d => d[0]), y: d3.mean(p, d => d[1]) };
+  });
+  for (let k = 0; k < 40; k++) for (const a of pts) for (const b of pts) {
+    if (a === b) continue;
+    const dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 1, min = 26;
+    if (d < min) { const m = (min - d) / 2 / d; a.x -= dx * m; a.y -= dy * m; b.x += dx * m; b.y += dy * m; }
+  }
+  for (const p of pts) pins.set(p.iso, [p.x, p.y]);
+}
+function pinPos(list) { return pins.get(list[0].iso); }
+
+function drawPins() {
+  const layer = d3.select("#pinLayer");
+  const groups = [...byIso.values()];
+  const g = layer.selectAll("g.pin").data(groups, d => d[0].iso).join(e => {
+    const x = e.append("g").attr("class", "pin");
+    x.append("circle").attr("class", "halo").attr("r", 18);
+    x.append("circle").attr("class", "ring").attr("r", 12);
+    x.append("circle").attr("class", "core hit").attr("r", 11);
+    x.append("text");
+    return x;
+  });
+  g.attr("transform", d => `translate(${pinPos(d)})`)
+   .classed("active", d => selected && d.includes(selected))
+   .classed("live", d => connected && d.includes(connected));
+  g.select(".halo").attr("opacity", d => selected && d.includes(selected) ? 1 : 0);
+  g.select("text").text(d => d.length);
+  g.select(".hit")
+   .on("click", (ev, d) => choose(d, ev))
+   .on("mousemove", (ev, d) => showTip(d, ev)).on("mouseleave", hideTip);
+
+  const h = projection([HOME.lon, HOME.lat]);
+  const home = layer.selectAll("g.home").data([0]).join(e => {
+    const x = e.append("g").attr("class", "home");
+    x.append("circle").attr("class", "ring").attr("r", 8);
+    x.append("circle").attr("class", "core").attr("r", 3.5);
+    x.append("text").attr("class", "home-label").attr("x", 12).attr("y", 4).text("YOU");
+    return x;
+  });
+  home.attr("transform", `translate(${h})`);
+}
+
+let cometRaf = 0;
+function drawRoute() {
+  cancelAnimationFrame(cometRaf);
+  const layer = d3.select("#routeLayer"); layer.selectAll("*").remove();
+  if (!selected || !projection) return;
+  const a = projection([HOME.lon, HOME.lat]), b = pinPos(byIso.get(selected.iso));
+  const d = Math.hypot(b[0] - a[0], b[1] - a[1]);
+  const c = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2 - d * 0.32];
+  const grad = d3.select("#routeGrad").attr("x1", a[0]).attr("y1", a[1]).attr("x2", b[0]).attr("y2", b[1]);
+  const p = layer.append("path").attr("class", "route" + (connected?.id === selected.id ? " live" : ""))
+    .attr("d", `M${a}Q${c} ${b}`);
+  if (connected?.id !== selected.id) return;
+  const node = p.node(), len = node.getTotalLength();
+  const comet = layer.append("circle").attr("class", "comet").attr("r", 2.6);
+  const tick = t => {
+    const pt = node.getPointAtLength(((t / 1600) % 1) * len);
+    comet.attr("cx", pt.x).attr("cy", pt.y);
+    cometRaf = requestAnimationFrame(tick);
+  };
+  cometRaf = requestAnimationFrame(tick);
+}
+
+/* hover / click on the dotted land itself */
+dots.addEventListener("mousemove", ev => {
+  if (!idx) return;
+  const r = stage.getBoundingClientRect(), i = idx(ev.clientX - r.left, ev.clientY - r.top);
+  const iso = i >= 0 ? +world[i].id : null;
+  const has = iso && byIso.has(iso);
+  dots.style.cursor = has ? "pointer" : "default";
+  if (has) showTip(byIso.get(iso), ev); else hideTip();
+  if (iso !== hoverIso) { hoverIso = iso; paintDots(); }
+});
+dots.addEventListener("mouseleave", () => { hoverIso = null; paintDots(); hideTip(); });
+dots.addEventListener("click", ev => {
+  const r = stage.getBoundingClientRect(), i = idx?.(ev.clientX - r.left, ev.clientY - r.top);
+  if (i >= 0 && byIso.has(+world[i].id)) choose(byIso.get(+world[i].id), ev);
+});
+
+const tip = $("tip");
+function showTip(list, ev) {
+  const r = stage.getBoundingClientRect(), c = list[0];
+  tip.innerHTML = `<img src="${flag(c.cc, 40)}" alt="">${c.country}<span>${list.length} config${list.length > 1 ? "s" : ""}</span>`;
+  tip.style.left = ev.clientX - r.left + 14 + "px"; tip.style.top = ev.clientY - r.top + 14 + "px"; tip.style.display = "flex";
+}
+function hideTip() { tip.style.display = "none"; }
+
+const pick = $("pick");
+function choose(list, ev) {
+  ev.stopPropagation(); hideTip();
+  if (list.length === 1) return select(list[0]);
+  const r = stage.getBoundingClientRect(), c = list[0];
+  pick.innerHTML = `<header><img src="${flag(c.cc, 40)}" alt="">${c.country}</header>` +
+    list.map(c => `<div data-id="${c.id}"><span style="color:var(--fg);font:inherit">${c.name}</span><span>${c.ip}</span></div>`).join("");
+  pick.style.left = Math.min(ev.clientX - r.left + 10, r.width - 230) + "px";
+  pick.style.top = ev.clientY - r.top + 10 + "px";
+  pick.style.display = "block";
+}
+pick.addEventListener("click", e => { const d = e.target.closest("[data-id]"); if (d) select(CONFIGS.find(c => c.id == d.dataset.id)); });
+document.addEventListener("click", () => pick.style.display = "none");
+
+/* ───────── detail ───────── */
+function select(c) {
+  selected = c; pick.style.display = "none";
+  $("rFlag").src = flag(c.cc, 40); $("rCity").textContent = c.city;
+  $("bgFlag").src = flag(c.cc, 320);
+  $("dCountry").textContent = c.country; $("dIp").textContent = c.ip;
+  $("dName").textContent = c.name; $("dProto").textContent = c.proto; $("dPort").textContent = ":" + c.port;
+  $("detail").classList.add("open");
+  paint(); renderRows(); paintDots(); drawPins(); drawRoute();
+}
+$("close").onclick = () => { selected = null; $("detail").classList.remove("open"); renderRows(); paintDots(); drawPins(); drawRoute(); };
+
+$("power").onclick = () => {
+  if (connecting) return;
+  if (connected?.id === selected.id) { connected = null; paint(); renderRows(); drawPins(); drawRoute(); paintDots(); return; }
+  connecting = true; connected = null; paint();
+  setTimeout(() => {
+    connecting = false; connected = selected; t0 = Date.now(); rx = 0; tx = 0;
+    hist.forEach(h => { h[0] = 0; h[1] = 0; });
+    paint(); renderRows(); drawPins(); drawRoute(); paintDots();
+  }, 1400);
+};
+$("tog").onclick = () => $("ks").classList.toggle("on");
+
+function paint() {
+  const on = !!(connected && selected && connected.id === selected.id);
+  $("pw").className = "power-wrap" + (on ? " on" : connecting ? " connecting" : "");
+  $("pLabel").textContent = on ? "DISCONNECT" : connecting ? "…" : "CONNECT";
+  $("state").innerHTML = on ? "<b>● Protected</b>" : connecting ? "Handshaking…" : connected ? `Connected to ${connected.name}` : "Not connected";
+  $("arr").classList.toggle("live", on);
+  $("since").innerHTML = on ? `since<br>${new Date(t0).toTimeString().slice(0, 5)}` : "—";
+  $("tIp").textContent = on ? "10.8.0.14" : "—";
+  $("dns").textContent = on ? "1.1.1.1" : "—";
+  $("hs").textContent = on ? "just now" : "—";
+  $("lat").textContent = selected ? `${selected.ping} ms` : "—";
+  $("latBars").className = "bars q" + (selected ? q(selected.ping) : 0);
+  if (!on) { $("time").textContent = "00:00:00"; $("rx").innerHTML = "0 <small>MB</small>"; $("tx").innerHTML = "0 <small>MB</small>"; $("sDn").textContent = "0.0"; $("sUp").textContent = "0.0"; }
+  const any = !!connected;
+  $("pillDot").classList.toggle("on", any);
+  $("pillState").textContent = any ? "Protected" : "Unprotected";
+  $("pillIp").textContent = any ? connected.ip : HOME.ip;
+  spark();
+}
+
+const fmt = mb => mb >= 1024 ? `${(mb / 1024).toFixed(2)} <small>GB</small>` : `${mb.toFixed(1)} <small>MB</small>`;
+setInterval(() => {
+  const on = connected && connected.id === selected?.id;
+  const dn = on ? Math.max(0.1, 1.6 + Math.sin(Date.now() / 2300) * 1.1 + Math.random() * .9) : 0;
+  const up = on ? Math.max(0.05, .25 + Math.random() * .35) : 0;
+  hist.push([dn, up]); hist.shift();
+  if (on) {
+    const s = Math.floor((Date.now() - t0) / 1000);
+    $("time").textContent = [s / 3600, (s / 60) % 60, s % 60].map(n => String(Math.floor(n)).padStart(2, "0")).join(":");
+    rx += dn; tx += up;
+    $("rx").innerHTML = fmt(rx); $("tx").innerHTML = fmt(tx);
+    $("sDn").textContent = dn.toFixed(1); $("sUp").textContent = up.toFixed(1);
+    $("hs").textContent = `${s % 120}s ago`;
+  }
+  spark();
+}, 1000);
+
+function spark() {
+  const cv = $("spark"), r = cv.getBoundingClientRect(); if (!r.width) return;
+  const d = devicePixelRatio || 1; cv.width = r.width * d; cv.height = r.height * d;
+  const c = cv.getContext("2d"); c.scale(d, d);
+  const w = r.width, h = r.height, max = Math.max(3, ...hist.map(x => x[0]));
+  const line = (k, col, fill) => {
+    c.beginPath();
+    hist.forEach((v, i) => { const x = i / (hist.length - 1) * w, y = h - 2 - v[k] / max * (h - 6); i ? c.lineTo(x, y) : c.moveTo(x, y); });
+    c.strokeStyle = col; c.lineWidth = 1.6; c.lineJoin = "round"; c.stroke();
+    if (fill) { c.lineTo(w, h); c.lineTo(0, h); c.closePath(); const g = c.createLinearGradient(0, 0, 0, h); g.addColorStop(0, fill); g.addColorStop(1, "transparent"); c.fillStyle = g; c.fill(); }
+  };
+  line(0, "#7c93ff", "rgba(124,147,255,.22)");
+  line(1, "#b48cff");
+}
+
+/* ───────── dock ───────── */
+const dock = $("dock"), slider = $("slider");
+function moveSlider(b) { slider.style.left = b.offsetLeft + "px"; slider.style.width = b.offsetWidth + "px"; }
+const labels = { configs: "Configs", split: "Split tunneling", logs: "Logs", settings: "Settings" };
+dock.addEventListener("click", e => {
+  const b = e.target.closest("button"); if (!b) return;
+  dock.querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b)); moveSlider(b);
+  const v = b.dataset.v, map = v === "map";
+  for (const id of ["dots", "overlay", "pill"]) $(id).style.display = map ? "" : "none";
+  document.querySelector(".zoom").style.display = map ? "" : "none";
+  $("ph").style.display = map ? "none" : "grid";
+  $("ph").textContent = labels[v] ? `${labels[v]} — existing screen goes here` : "";
+});
+requestAnimationFrame(() => moveSlider(dock.querySelector(".on")));
+document.addEventListener("keydown", e => { if (e.key === "/" && document.activeElement !== $("q")) { e.preventDefault(); $("q").focus(); } });
+
+renderRows(); paint();
+</script>
+</body>
+</html>

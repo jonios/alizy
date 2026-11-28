@@ -218,6 +218,12 @@ export interface ImportReport {
   warnings: { source: string; messages: string[] }[];
 }
 
+/** Server country of one profile (ISO 3166-1 alpha-2, uppercase). */
+export interface GeoResult {
+  profile_id: string;
+  country: string | null;
+}
+
 /** Result of one ICMP probe of a profile's endpoint host. */
 export interface PingResult {
   profile_id: string;

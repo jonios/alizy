@@ -245,6 +245,11 @@ function AboutCard() {
                 <Badge>{appInfo.secret_backend}</Badge>
               )}
             </InfoRow>
+            <InfoRow label={t("Country data")}>
+              <span className="text-[12px] text-muted">
+                {t("IP geolocation by")} <span dir="ltr">DB-IP (db-ip.com), CC BY 4.0</span>
+              </span>
+            </InfoRow>
           </div>
           {appInfo.daemon.reachable &&
             (appInfo.daemon.version ?? daemonVersion) !== null &&

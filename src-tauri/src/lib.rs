@@ -2,6 +2,7 @@
 
 mod commands;
 mod daemon_client;
+mod geo;
 mod ping;
 mod poller;
 mod state;
@@ -126,6 +127,7 @@ pub fn run() {
             commands::quit_ui,
             commands::profiles_list,
             commands::profiles_ping,
+            commands::profiles_geo,
             commands::profile_get,
             commands::profile_validate_text,
             commands::profile_import_text,

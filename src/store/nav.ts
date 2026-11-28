@@ -34,6 +34,9 @@ interface NavState {
   detailsId: string | null;
   /** a section id to scroll into view after navigation (e.g. "system-check") */
   focus: string | null;
+  /** profile shown in the map's side panel */
+  selectedId: string | null;
+  select: (id: string | null) => void;
   go: (screen: Screen, focus?: string | null) => void;
   openDetails: (id: string) => void;
   closeDetails: () => void;
@@ -44,6 +47,8 @@ export const useNav = create<NavState>((set) => ({
   screen: "dashboard",
   detailsId: null,
   focus: null,
+  selectedId: null,
+  select: (selectedId) => set({ selectedId }),
   go: (screen, focus = null) => set({ screen, focus }),
   openDetails: (id) => set({ detailsId: id }),
   closeDetails: () => set({ detailsId: null }),

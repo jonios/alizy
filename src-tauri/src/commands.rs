@@ -279,8 +279,14 @@ pub async fn profiles_list(st: S<'_>) -> R<Vec<ProfileSummary>> {
 /// are probed once; results are not stored anywhere.
 #[tauri::command]
 pub async fn profiles_ping(st: S<'_>) -> R<Vec<crate::ping::PingResult>> {
+    Ok(crate::ping::ping_all(profile_hosts(&st).await?).await)
+}
+
+/// Every profile's target host as configured: the WireGuard endpoint, or the
+/// SSH server address.
+async fn profile_hosts(st: &AppState) -> R<Vec<(String, String)>> {
     let rows = st.profiles.db.list_profiles().await.map_err(e)?;
-    let targets: Vec<(String, String)> = rows
+    Ok(rows
         .iter()
         .filter_map(|r| {
             // SSH rows carry a placeholder WireGuard config and keep their
@@ -295,8 +301,13 @@ pub async fn profiles_ping(st: S<'_>) -> R<Vec<crate::ping::PingResult>> {
             };
             Some((r.id.clone(), host))
         })
-        .collect();
-    Ok(crate::ping::ping_all(targets).await)
+        .collect())
+}
+
+/// Country of every profile's server, from the offline table in `geo`.
+#[tauri::command]
+pub async fn profiles_geo(st: S<'_>) -> R<Vec<crate::geo::GeoResult>> {
+    Ok(crate::geo::locate_all(profile_hosts(&st).await?).await)
 }
 
 #[derive(Serialize)]

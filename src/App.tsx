@@ -4,16 +4,17 @@ import { EVENTS } from "./lib/api";
 import type { StatusEvent } from "./lib/types";
 import { useStatus } from "./store/status";
 import { useProfiles } from "./store/profiles";
+import { useGeo } from "./store/geo";
 import { useSettings } from "./store/settings";
 import { usePolicy } from "./store/policy";
 import { resolveScreen, useNav } from "./store/nav";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { Toaster } from "./components/ui/toaster";
-import { Sidebar } from "./components/Sidebar";
+import { Dock } from "./components/Dock";
 import { ImportReportDialog } from "./components/ImportReportDialog";
 import { DropOverlay } from "./components/DropOverlay";
 import { useTheme } from "./components/useTheme";
-import { Dashboard } from "./screens/dashboard/Dashboard";
+import { MapScreen } from "./screens/map/MapScreen";
 import { Configurations } from "./screens/configurations/Configurations";
 import { SshFlowDialogs } from "./screens/configurations/HostKeyDialog";
 import { ProfileDetailsSheet } from "./screens/configurations/ProfileDetails";
@@ -22,6 +23,7 @@ import { NetworkSettings } from "./screens/network/NetworkSettings";
 import { GeneralSettings } from "./screens/general/GeneralSettings";
 import { Logs } from "./screens/logs/Logs";
 import { setLang } from "./i18n";
+import { cn } from "./lib/utils";
 
 function useBackendWiring() {
   useEffect(() => {
@@ -31,7 +33,12 @@ function useBackendWiring() {
       unlisteners.push(p);
     };
     safe(listen<StatusEvent>(EVENTS.status, (e) => useStatus.getState().ingest(e.payload)));
-    safe(listen(EVENTS.profilesChanged, () => void useProfiles.getState().load()));
+    safe(
+      listen(EVENTS.profilesChanged, () => {
+        void useProfiles.getState().load();
+        void useGeo.getState().load();
+      }),
+    );
     safe(
       listen<string>(EVENTS.navigate, (e) => {
         const target = typeof e.payload === "string" ? resolveScreen(e.payload) : null;
@@ -41,6 +48,7 @@ function useBackendWiring() {
 
     void useStatus.getState().bootstrap();
     void useProfiles.getState().load();
+    void useGeo.getState().load();
     void useSettings.getState().loadSettings();
     void useSettings.getState().loadAppInfo();
     void usePolicy.getState().load();
@@ -55,7 +63,7 @@ function CurrentScreen() {
   const screen = useNav((s) => s.screen);
   switch (screen) {
     case "dashboard":
-      return <Dashboard />;
+      return <MapScreen />;
     case "configurations":
       return <Configurations />;
     case "split":
@@ -81,10 +89,13 @@ export default function App() {
   return (
     <TooltipProvider delayDuration={350} skipDelayDuration={150}>
       <Fragment key={language}>
-      <div className="flex h-full min-h-0 w-full bg-background text-fg">
-        <Sidebar />
-        {/* @container: screens size their grids against the space beside the sidebar, not the window. */}
-        <main key={screen} className="@container relative flex min-w-0 flex-1 animate-fade-in flex-col overflow-hidden">
+      <div className="relative flex h-full min-h-0 w-full bg-background text-fg">
+        {/* The map screen places the dock over the map itself; other screens start below it. */}
+        {screen !== "dashboard" && <Dock />}
+        <main
+          key={screen}
+          className={cn("@container relative flex min-w-0 flex-1 animate-fade-in flex-col overflow-hidden", screen !== "dashboard" && "pt-14")}
+        >
           <CurrentScreen />
         </main>
       </div>

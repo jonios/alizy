@@ -45,6 +45,7 @@ The app is a portable **AppImage** that runs as your user. The privileged part i
 | **Tunnel or proxy mode** | *Tunnel mode* sends all of the computer's traffic through the VPN. *Proxy mode* leaves the system alone and serves a local SOCKS5/HTTP proxy on `127.0.0.1`: only apps you point at it use the VPN, and it refuses connections while the VPN is down instead of going direct. |
 | **VPN sharing** | Share your VPN with a TV, console or phone on your Wi-Fi: HTTP and SOCKS5 proxies (SOCKS5 with UDP), optionally behind a username and password. |
 | **Profiles** | Favourites, categories, edit, duplicate, export, backup and restore. Private keys live in your desktop keyring, never in the database. |
+| **World map** | Every config sits on a map under its server's country, with a count per country; click one to open its panel: connect, session time, traffic, latency and the kill switch. Countries come from an offline table built into the app, so no lookup leaves your computer. |
 | **Desktop app** | English and Persian (right-to-left) interface, tray icon, notifications, light and dark themes, launch at login, auto-connect, and reconnect after updates. Logs and connection history. |
 
 ## Screenshots
@@ -286,3 +287,5 @@ sing-box and subscriptions: [docs/MULTI_PROTOCOL.md](docs/MULTI_PROTOCOL.md).
 ## License
 
 [GPL-3.0-or-later](LICENSE)
+
+The country table in `src-tauri/geoip/` is derived from [DB-IP](https://db-ip.com)'s IP to Country Lite database, licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Flags are from [flag-icons](https://github.com/lipis/flag-icons) (MIT); map outlines from [world-atlas](https://github.com/topojson/world-atlas) (Natural Earth, public domain).

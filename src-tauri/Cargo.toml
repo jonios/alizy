@@ -30,4 +30,5 @@ tauri-plugin-notification = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
 ureq = "2"
+flate2 = "1"
 nix = { version = "0.30", features = ["user", "net"] }
